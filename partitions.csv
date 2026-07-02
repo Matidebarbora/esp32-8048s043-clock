@@ -1,0 +1,6 @@
+# ESP32-8048S043 — 16 MB flash, no OTA
+# Name,     Type, SubType, Offset,   Size
+nvs,        data, nvs,     0x9000,   0x5000
+phy_init,   data, phy,     0xe000,   0x1000
+app,        app,  factory, 0x10000,  0x700000
+storage,    data, spiffs,  0x710000, 0x8F0000

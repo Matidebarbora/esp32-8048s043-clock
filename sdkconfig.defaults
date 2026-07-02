@@ -1,0 +1,36 @@
+# Flash
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# PSRAM (OPI SPIRAM on the ESP32-8048S043)
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
+CONFIG_SPIRAM_RODATA=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# LVGL — use Kconfig instead of lv_conf.h (simpler for PlatformIO)
+CONFIG_LV_CONF_SKIP=y
+CONFIG_LV_COLOR_DEPTH_16=y
+CONFIG_LV_THEME_DEFAULT_DARK=y
+
+# Fonts used by the clock UI
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_16=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_MONTSERRAT_24=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
+CONFIG_LV_FONT_MONTSERRAT_32=y
+CONFIG_LV_FONT_MONTSERRAT_48=y
+
+# Flex layout — required by the time-entry picker screen
+CONFIG_LV_USE_FLEX=y
+
+# Disable the default theme's button press transition animation. With
+# full_refresh=1 on this RGB panel, every animation frame forces a complete
+# 800x480 software re-render — on a widget-heavy screen (the on-screen
+# keyboard) that causes severe visible flicker on every keypress.
+CONFIG_LV_THEME_DEFAULT_TRANSITION_TIME=0
+
+# HTTPS (weather.cpp — Open-Meteo)
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
