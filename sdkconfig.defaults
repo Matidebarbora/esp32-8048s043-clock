@@ -25,6 +25,26 @@ CONFIG_LV_FONT_MONTSERRAT_48=y
 # Flex layout — required by the time-entry picker screen
 CONFIG_LV_USE_FLEX=y
 
+# Photo slideshow (photo_slideshow_screen.cpp) — no PNG/JPEG decoder is
+# enabled, so photos are pre-converted to raw LVGL-binary images
+# (tools/convert_photos.py) and read straight off the SD card. LVGL's
+# FS_STDIO driver maps drive letter 'S' onto ESP-IDF's FATFS VFS mount point
+# (SD_MOUNT_POINT in sd_card.h) via plain fopen()/fread(), so
+# lv_img_set_src(img, "S:/photos/x.bin") just works once the card is mounted
+# — no custom lv_fs driver needed.
+CONFIG_LV_USE_FS_STDIO=y
+CONFIG_LV_FS_STDIO_LETTER=83
+CONFIG_LV_FS_STDIO_PATH="/sdcard"
+
+# LVGL's own log module is off by default, which made the photo slideshow's
+# black-screen bug (image never rendering) silent — no warning anywhere,
+# from either the app or LVGL. Enabling it routes LVGL's internal
+# LV_LOG_WARN calls (image decoder open/read failures, bad color format,
+# etc.) through printf, alongside the app's own ESP_LOG output.
+CONFIG_LV_USE_LOG=y
+CONFIG_LV_LOG_LEVEL_WARN=y
+CONFIG_LV_LOG_PRINTF=y
+
 # Disable the default theme's button press transition animation. With
 # full_refresh=1 on this RGB panel, every animation frame forces a complete
 # 800x480 software re-render — on a widget-heavy screen (the on-screen

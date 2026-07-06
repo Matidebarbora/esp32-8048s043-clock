@@ -53,6 +53,10 @@ Time zone (winter/summer DST) is **not** in `config.h` — it's chosen at runtim
 | `notification_icon.cpp` | Builds a notification avatar: real brand icon (WhatsApp/Gmail) or colored-circle-with-initials fallback |
 | `notification_screen.cpp` | Full notification history screen (tap the notification card), "remove all" |
 | `es_fonts.h` / `lv_font_montserrat_{16,20}_es.c` | Spanish-accented-character font variants — see "Custom fonts" below |
+| `stocks.cpp` / `stocks_store.cpp` / `stocks_screen.cpp` | Yahoo Finance search/quote fetch (no API key — unofficial endpoints), NVS-backed pinned-symbol list (max 3), and the Settings sub-screen to search/pin/unpin — see "Stock tracking" below |
+| `sd_card.cpp` | Mounts the microSD card (FATFS over SPI) at boot for the photo slideshow — see "Photo slideshow" below |
+| `photo_slideshow_screen.cpp` | Full-screen photo slideshow (tap the time card) reading pre-converted images off the SD card, current time overlaid top-right, tap anywhere to exit |
+| `tools/convert_photos.py` | Offline tool (run on a PC, not on-device) that converts photos to the raw LVGL-binary format `photo_slideshow_screen.cpp` reads — see "Photo slideshow" below |
 
 ## Architecture
 
@@ -134,6 +138,26 @@ Per-app filtering (`notification_filter_settings.cpp`/`.h`) is checked in `ancs_
 Open-Meteo (`api.open-meteo.com`) needs no API key but also has no built-in IP geolocation — coordinates come from a one-time `ip-api.com` lookup at boot (`geolocation.cpp`), falling back to `FALLBACK_LATITUDE`/`FALLBACK_LONGITUDE` in `config.h` if that fails. `weather_task` (in `main.cpp`) re-fetches every 15 minutes (30 s retry on failure) and caches the last successful result via `weather_set_last()`/`weather_get_last()` so `forecast_screen.cpp` can read it without a network round trip.
 
 The sun-path arc on the main screen is a full 24h day/night loop, not just the daylight portion: geometry constants (`SUN_ARC_CX/CY/RADIUS` in `main.cpp`) define a circle whose horizontal diameter is the horizon — the marker travels 180°→0° over the top from sunrise to sunset (day), then continues 0°→-180° under the bottom from sunset back to the next sunrise (night), swapping between the sun and moon icon assets (`weather_icons_data.c`) at each crossing.
+
+### Stock tracking (stocks.cpp, stocks_store.cpp, stocks_screen.cpp)
+
+Same "no API key" philosophy as weather: uses Yahoo Finance's unofficial endpoints (`query1.finance.yahoo.com/v1/finance/search` for symbol/company search, `.../v8/finance/chart/{symbol}` for a single quote) with a browser `User-Agent` header, since Yahoo blocks obviously non-browser requests. `stocks_task` (in `main.cpp`) polls the up-to-3 pinned symbols every 60 s, or immediately after a pin/unpin (`stocks_store_set_changed_cb`), and rebuilds the header's stock card the same clean+rebuild-every-time way `update_notification_card()` does. See the "BLE + WiFi + TLS" hard-won lesson below (Bluetooth section) — adding this as a second concurrent HTTPS client is what surfaced the SPIRAM/mbedtls tuning documented there.
+
+### Photo slideshow (sd_card.cpp, photo_slideshow_screen.cpp, tools/convert_photos.py)
+
+Tap the time card to open a full-screen slideshow of photos read off the microSD card; tap anywhere to return. No PNG/JPEG decoder is enabled in this firmware, so photos can't just be copied onto the card as-is — `tools/convert_photos.py` (run on a PC, needs `pip install pillow numpy`) crops/scales each photo to exactly 800x480 ("cover" — fills the screen, crops the overflow, no letterboxing) and writes it as a raw LVGL-binary `.bin` file: a 4-byte `lv_img_header_t` bitfield header (`cf=LV_IMG_CF_TRUE_COLOR`, `w=800`, `h=480`) followed by row-major RGB565 pixel data. Copy the script's output `.bin` files into a `/photos` folder on the card.
+
+`sd_card_init()` mounts the card (FATFS over SPI) at `/sdcard`; LVGL's `CONFIG_LV_USE_FS_STDIO` driver (letter `S`, see `sdkconfig.defaults`) maps that mount point onto plain `fopen()`/`fread()`, so `photo_slideshow_screen.cpp` just does `lv_img_set_src(img, "S:/photos/0001.bin")` — LVGL's built-in decoder streams the image row-by-row from the card as it renders, no need to buffer a whole ~750 KB frame in RAM.
+
+**The SD card's SPI pins (`sd_card.cpp`: CS=GPIO10, MOSI=GPIO11, SCLK=GPIO12, MISO=GPIO13) are from community documentation for this board, not empirically verified against this specific unit** — unlike every pin in `lcd.h`, which was confirmed against real hardware. If the card fails to mount, check these against the board's silkscreen first (they're already confirmed to not collide with any RGB/touch pin actually in use).
+
+**Two silent failure modes, both worth knowing before re-debugging this from scratch:**
+- ESP-IDF's FATFS defaults to long-filename support *off* (`LFN_NONE`), so an 8.3-compatible name like `0001.bin` comes back from `readdir()` as `0001.BIN` — all-uppercase, short-name style. `photo_slideshow_screen.cpp`'s directory scan is case-insensitive to still find these, but that alone wasn't enough:
+- **LVGL's built-in image decoder does its own *case-sensitive* `.bin` extension check** (`lv_img_decoder.c`: `strcmp(lv_fs_get_ext(src), "bin")`), and unlike almost every other failure path in that file, **this one has no `LV_LOG_WARN` call at all** — a `.BIN` file is rejected completely silently, even with `CONFIG_LV_USE_LOG` enabled. This is why the slideshow's first real-hardware test showed a plain black screen with zero error anywhere in the log. Fix: `scan_photos()` lower-cases every filename it stores (FAT's own file lookup is case-insensitive regardless, so this doesn't affect actually finding the file on disk) — don't "fix" this by chasing an LVGL log line that will never appear.
+
+`CONFIG_LV_USE_LOG` (+ `LV_LOG_LEVEL_WARN` + `LV_LOG_PRINTF`) is enabled in `sdkconfig.defaults` specifically because of how long the above took to find with LVGL logging off — it's cheap (silent on the happy path) and worth keeping on for any future work that touches image/file loading.
+
+If a future photo needs a different color/behavior and this binary format needs revisiting, the authoritative reference is `lv_img_header_t` in `managed_components/lvgl__lvgl/src/draw/lv_img_buf.h` and `lv_color16_t` in `.../src/misc/lv_color.h` — both were used to derive the exact byte layout in `convert_photos.py`, and validated once by hand (decoding a converted file's header + sample pixels back in Python and checking against the source image) the same way the custom fonts' pipeline validates against the stock font file — don't skip that check when regenerating this format.
 
 ## Critical hardware details — ESP32-8048S043
 

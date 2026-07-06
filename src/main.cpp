@@ -32,6 +32,8 @@
 #include "notification_filter_settings.h"
 #include "stocks.h"
 #include "stocks_store.h"
+#include "sd_card.h"
+#include "photo_slideshow_screen.h"
 
 static const char *TAG = "main";
 
@@ -242,6 +244,12 @@ static void on_weather_card_click(lv_event_t *e)
     forecast_screen_show(clock_scr);
 }
 
+static void on_time_card_click(lv_event_t *e)
+{
+    auto *clock_scr = (lv_obj_t *)lv_event_get_user_data(e);
+    photo_slideshow_screen_show(clock_scr);
+}
+
 static void on_notification_card_click(lv_event_t *e)
 {
     auto *clock_scr = (lv_obj_t *)lv_event_get_user_data(e);
@@ -421,11 +429,11 @@ static void build_ui(lv_obj_t *scr)
 
     // Sits where the Wi-Fi SSID label used to be, top-left of the header.
     g_date_label = lv_label_create(scr);
-    lv_obj_set_style_text_font(g_date_label, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(g_date_label, &lv_font_montserrat_24, 0);
     lv_obj_set_style_text_color(g_date_label, lv_color_make(170, 170, 175), 0);
     lv_obj_set_width(g_date_label, 400);
     lv_label_set_long_mode(g_date_label, LV_LABEL_LONG_DOT);
-    lv_obj_align(g_date_label, LV_ALIGN_TOP_LEFT, 16, 18);
+    lv_obj_align(g_date_label, LV_ALIGN_TOP_LEFT, CARD_MARGIN, 16);  // left edge lines up with the cards below
     lv_label_set_text(g_date_label, "");
 
     lv_obj_t *gear = lv_btn_create(scr);
@@ -466,6 +474,9 @@ static void build_ui(lv_obj_t *scr)
     lv_obj_set_style_pad_ver(time_card, 16, 0);
     lv_obj_set_flex_align(time_card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_align(time_card, LV_ALIGN_TOP_LEFT, CARD_MARGIN, header_row_y);
+    // Tappable: opens the photo slideshow (photo_slideshow_screen.cpp).
+    lv_obj_set_style_bg_color(time_card, lv_color_make(36, 36, 42), LV_STATE_PRESSED);
+    lv_obj_add_event_cb(time_card, on_time_card_click, LV_EVENT_CLICKED, scr);
 
     lv_obj_t *time_row = lv_obj_create(time_card);
     lv_obj_remove_style_all(time_row);
@@ -1032,6 +1043,10 @@ extern "C" void app_main(void)
 
     ESP_ERROR_CHECK(LCDInit());
     lcd_set_backlight(100);  // matches g_brightness_full's initial value
+
+    // Independent of Wi-Fi/BLE — just mounts the microSD card (if any) for
+    // photo_slideshow_screen.cpp. Doesn't block boot if no card is present.
+    sd_card_init();
 
     // Must happen before ancs_client_init() — a notification could in theory
     // arrive as soon as the BLE stack is up, and it needs to know which

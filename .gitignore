@@ -10,3 +10,7 @@ managed_components/
 # Auto-generated from sdkconfig.defaults; regenerated on demand, don't track
 # (but DO track sdkconfig.defaults itself)
 sdkconfig.esp32s3-clock
+
+# tools/convert_photos.py's output — personal photos converted for the SD
+# card slideshow, not source code
+tools/sd_photos/
