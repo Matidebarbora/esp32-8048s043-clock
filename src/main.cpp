@@ -878,7 +878,9 @@ static void wifi_status_tick_cb(lv_timer_t *)
 
 // If the Wi-Fi connection is ever down (failed at boot, or dropped later),
 // retry every 10 s. Runs on its own task since wifi_connect_any() blocks for
-// up to its timeout; wifi_time.cpp serializes it against wifi_connect_one()
+// up to 8 s per saved network (so a full cycle through several candidates can
+// take longer than the 10 s gap between retries — that's fine, this task has
+// nothing else to do); wifi_time.cpp serializes it against wifi_connect_one()
 // (manual connect from the settings screen) so they never touch the driver
 // at the same time.
 static void wifi_reconnect_task(void *)
@@ -890,7 +892,7 @@ static void wifi_reconnect_task(void *)
 
         ESP_LOGI(TAG, "Wi-Fi is down, retrying...");
         build_connect_candidates();  // pick up any network saved since boot
-        if (wifi_connect_any(g_connect_candidates, g_connect_candidate_count, nullptr, 8000) == ESP_OK)
+        if (wifi_connect_any(g_connect_candidates, g_connect_candidate_count, nullptr, 6000) == ESP_OK)
             ESP_LOGI(TAG, "Reconnected");
     }
 }
@@ -1130,12 +1132,14 @@ extern "C" void app_main(void)
     xTaskCreate(wifi_reconnect_task, "wifi_reconnect", 4096, nullptr, tskIDLE_PRIORITY + 1, nullptr);
     xTaskCreate(dimmer_task, "dimmer", 3072, nullptr, tskIDLE_PRIORITY + 1, &s_dimmer_task_handle);
 
-    // WiFi → NTP, 10 s total budget. No WiFi / no sync just leaves the time
-    // and date blank — clock_tick_cb() already no-ops while the system clock
-    // is unset (tm_year <= 70), so the digit images stay at their "--:--:--"
-    // placeholder and the date label stays empty.
+    // WiFi → NTP, 8 s per saved network (so every candidate gets a real shot
+    // instead of a shared budget the first slow/unreachable one can eat up).
+    // No WiFi / no sync just leaves the time and date blank — clock_tick_cb()
+    // already no-ops while the system clock is unset (tm_year <= 70), so the
+    // digit images stay at their "--:--:--" placeholder and the date label
+    // stays empty.
     esp_err_t wifi_ok = wifi_connect_any(g_connect_candidates, g_connect_candidate_count,
-                                          wifi_cb, 10000);
+                                          wifi_cb, 8000);
     if (wifi_ok == ESP_OK) {
         set_status("Syncing time...");
         if (time_sync(app_settings_get_tz(), NTP_SERVER) == ESP_OK) {

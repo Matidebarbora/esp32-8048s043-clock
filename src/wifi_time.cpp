@@ -2,6 +2,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "esp_wifi.h"
@@ -89,32 +90,21 @@ static void wifi_stack_init_once()
 }
 
 esp_err_t wifi_connect_any(const wifi_network_t *networks, size_t count,
-                            wifi_status_cb_t cb, uint32_t total_timeout_ms)
+                            wifi_status_cb_t cb, uint32_t per_network_timeout_ms)
 {
     xSemaphoreTake(s_wifi_op_mutex, portMAX_DELAY);
     wifi_stack_init_once();
 
-    ESP_LOGI(TAG, "WiFi started — budget: %lu ms, networks: %zu", (unsigned long)total_timeout_ms, count);
+    ESP_LOGI(TAG, "WiFi started — %lu ms/network, networks: %zu",
+             (unsigned long)per_network_timeout_ms, count);
 
-    TickType_t t_start    = xTaskGetTickCount();
-    TickType_t t_deadline = t_start + pdMS_TO_TICKS(total_timeout_ms);
-    esp_err_t  result     = ESP_FAIL;
+    TickType_t t_start = xTaskGetTickCount();
+    esp_err_t  result  = ESP_FAIL;
 
     for (size_t i = 0; i < count; i++) {
-        // How much budget is left?
-        TickType_t t_now       = xTaskGetTickCount();
-        TickType_t t_remaining = t_deadline - t_now;
-
-        if ((int32_t)t_remaining <= 0) {
-            ESP_LOGW(TAG, "[%lu ms] Budget exhausted before trying \"%s\"",
-                     (unsigned long)elapsed_ms(t_start), networks[i].ssid);
-            break;
-        }
-
-        ESP_LOGI(TAG, "[%lu ms] Trying \"%s\" (%zu/%zu), %lu ms remaining...",
+        ESP_LOGI(TAG, "[%lu ms] Trying \"%s\" (%zu/%zu)...",
                  (unsigned long)elapsed_ms(t_start),
-                 networks[i].ssid, i + 1, count,
-                 (unsigned long)(t_remaining * portTICK_PERIOD_MS));
+                 networks[i].ssid, i + 1, count);
 
         if (cb) cb(networks[i].ssid, i, count);
 
@@ -130,7 +120,7 @@ esp_err_t wifi_connect_any(const wifi_network_t *networks, size_t count,
         EventBits_t bits = xEventGroupWaitBits(s_wifi_group,
                                                CONNECTED_BIT | FAIL_BIT,
                                                pdFALSE, pdFALSE,
-                                               t_remaining);
+                                               pdMS_TO_TICKS(per_network_timeout_ms));
 
         if (bits & CONNECTED_BIT) {
             ESP_LOGI(TAG, "[%lu ms] Connected to \"%s\"",
@@ -139,21 +129,16 @@ esp_err_t wifi_connect_any(const wifi_network_t *networks, size_t count,
             break;
         }
 
-        if (bits == 0) {
-            // xEventGroupWaitBits timed out — budget is gone
-            ESP_LOGW(TAG, "[%lu ms] Total timeout reached on \"%s\"",
-                     (unsigned long)elapsed_ms(t_start), networks[i].ssid);
-            break;
-        }
-
-        ESP_LOGW(TAG, "[%lu ms] \"%s\" unreachable, trying next...",
-                 (unsigned long)elapsed_ms(t_start), networks[i].ssid);
+        ESP_LOGW(TAG, "[%lu ms] \"%s\" unreachable (%s), trying next...",
+                 (unsigned long)elapsed_ms(t_start), networks[i].ssid,
+                 bits == 0 ? "timed out" : "disconnected");
         esp_wifi_disconnect();
         vTaskDelay(pdMS_TO_TICKS(200));
     }
 
     if (result != ESP_OK)
-        ESP_LOGE(TAG, "All networks failed after %lu ms", (unsigned long)elapsed_ms(t_start));
+        ESP_LOGE(TAG, "All %zu network(s) failed after %lu ms", count,
+                 (unsigned long)elapsed_ms(t_start));
 
     xSemaphoreGive(s_wifi_op_mutex);
     return result;

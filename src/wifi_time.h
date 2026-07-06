@@ -22,11 +22,12 @@ void wifi_time_init(void);
 typedef void (*wifi_status_cb_t)(const char *ssid, size_t index, size_t total);
 
 // Try each network in order; return ESP_OK on the first that connects.
-// total_timeout_ms is shared across ALL attempts — the loop stops as soon as
-// the budget is exhausted, even if not every network has been tried.
+// per_network_timeout_ms applies separately to EACH attempt, so a network
+// that's out of range or has a stale password can't eat the time budget of
+// the ones after it in the list — every saved network gets a real shot.
 // cb is optional (pass NULL to skip).
 esp_err_t wifi_connect_any(const wifi_network_t *networks, size_t count,
-                            wifi_status_cb_t cb, uint32_t total_timeout_ms);
+                            wifi_status_cb_t cb, uint32_t per_network_timeout_ms);
 
 // Sync system time via NTP and set the local timezone.
 // timezone: POSIX TZ string, e.g. "<-03>3" for Argentina UTC-3.
