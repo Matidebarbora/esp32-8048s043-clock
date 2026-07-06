@@ -7,6 +7,8 @@ extern "C" {
 
 extern const lv_img_dsc_t img_weather_sun_100;
 extern const lv_img_dsc_t img_weather_sun_32;
+extern const lv_img_dsc_t img_weather_moon_100;
+extern const lv_img_dsc_t img_weather_moon_32;
 extern const lv_img_dsc_t img_weather_partly_cloudy_100;
 extern const lv_img_dsc_t img_weather_partly_cloudy_32;
 extern const lv_img_dsc_t img_weather_cloud_100;

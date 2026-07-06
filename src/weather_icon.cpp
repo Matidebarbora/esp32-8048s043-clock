@@ -22,11 +22,13 @@ static weather_icon_kind_t classify(int code)
     }
 }
 
-static const lv_img_dsc_t *pick(weather_icon_kind_t kind, lv_coord_t size)
+static const lv_img_dsc_t *pick(weather_icon_kind_t kind, lv_coord_t size, bool is_night)
 {
     bool small = size <= 32;
     switch (kind) {
-        case WI_SUN:           return small ? &img_weather_sun_32           : &img_weather_sun_100;
+        case WI_SUN:
+            if (is_night) return small ? &img_weather_moon_32 : &img_weather_moon_100;
+            return small ? &img_weather_sun_32 : &img_weather_sun_100;
         case WI_PARTLY_CLOUDY: return small ? &img_weather_partly_cloudy_32 : &img_weather_partly_cloudy_100;
         case WI_CLOUD:         return small ? &img_weather_cloud_32         : &img_weather_cloud_100;
         case WI_FOG:           return small ? &img_weather_fog_32           : &img_weather_fog_100;
@@ -37,9 +39,9 @@ static const lv_img_dsc_t *pick(weather_icon_kind_t kind, lv_coord_t size)
     }
 }
 
-lv_obj_t *weather_icon_create(lv_obj_t *parent, int weather_code, lv_coord_t size)
+lv_obj_t *weather_icon_create(lv_obj_t *parent, int weather_code, lv_coord_t size, bool is_night)
 {
     lv_obj_t *img = lv_img_create(parent);
-    lv_img_set_src(img, pick(classify(weather_code), size));
+    lv_img_set_src(img, pick(classify(weather_code), size, is_night));
     return img;
 }

@@ -42,6 +42,7 @@ Time zone (winter/summer DST) is **not** in `config.h` — it's chosen at runtim
 | `app_settings.cpp` | NVS-backed app settings — currently just DST mode (winter/summer), sets the POSIX `TZ` env var |
 | `settings_screen.cpp` | Settings menu (gear icon) — list of sub-screens |
 | `season_time_screen.cpp` | Settings sub-screen: winter/summer DST toggle |
+| `notification_filter_settings.cpp` / `notification_filter_screen.cpp` | NVS-backed per-app notification toggles (currently just "hide WhatsApp") + its Settings sub-screen (one switch row per app) — same NVS-settings/UI-screen split as `app_settings`/`season_time_screen` and `dimmer_settings`/`dimmer_screen` |
 | `dimmer_settings.cpp` / `dimmer_screen.cpp` | NVS-backed backlight dimmer (OFF/ON/AUTO with scheduled start/end times) + its settings sub-screen |
 | `weather.cpp` / `weather_icon.cpp` / `weather_icons_data.c` | Open-Meteo fetch/parse + cache, WMO-code-to-icon classification, Twemoji-derived icon bitmaps (sun/moon/cloud/rain/snow/storm, 100px + 32px) |
 | `geolocation.cpp` | One-time IP-based geolocation (ip-api.com) for the weather card's coordinates |
@@ -124,6 +125,8 @@ Hard-won lessons, in the order they'd bite again:
 - **This target defaults to the BLE 5.0 extended-advertising API**, which is mutually exclusive with the legacy 4.2 `esp_ble_gap_start_advertising()`/`start_scanning()` calls this code uses — see `CONFIG_BT_BLE_50_FEATURES_SUPPORTED=n` / `CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y` in `sdkconfig.defaults`.
 - **BLE + WiFi + TLS together starve internal RAM** enough to fail `mbedtls_ssl_setup` mid-handshake once the BT stack is up (this project has 8 MB of PSRAM but mbedtls' default buffers and much of the BT stack default to internal SRAM). Fixed via `CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST=y` + `CONFIG_MBEDTLS_DYNAMIC_BUFFER=y` + a smaller `CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN` — see `sdkconfig.defaults`.
 - **iOS never exposes the phone's own battery level (or anything else outside ANCS/AMS) to a non-MFi accessory over BLE.** Don't go looking for a battery-service workaround; there isn't one without MFi hardware.
+
+Per-app filtering (`notification_filter_settings.cpp`/`.h`) is checked in `ancs_client.cpp` right where a notification's app name is known, before it reaches `notification_store` — filtered notifications never enter the store, so they don't show on the card, the history screen, or (if you add push-style alerts later) trigger anything else. Currently only WhatsApp has a toggle; add more `get/set` pairs plus a `strcmp` there and a row in `notification_filter_screen.cpp` to extend it.
 
 ### Weather (weather.cpp, geolocation.cpp)
 

@@ -18,6 +18,17 @@ struct HttpCtx {
     size_t cap;
 };
 
+// "2026-07-02T07:15" -> "07:15". Falls back to "--:--" if the shape is off.
+static void extract_hhmm(const cJSON *arr, int index, char *out, size_t out_size)
+{
+    strlcpy(out, "--:--", out_size);
+    if (!arr) return;
+    cJSON *item = cJSON_GetArrayItem(arr, index);
+    if (!cJSON_IsString(item)) return;
+    const char *t = strchr(item->valuestring, 'T');
+    if (t && strlen(t + 1) >= 5) strlcpy(out, t + 1, out_size);
+}
+
 static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 {
     if (evt->event_id != HTTP_EVENT_ON_DATA) return ESP_OK;
@@ -39,7 +50,7 @@ esp_err_t weather_fetch(float latitude, float longitude, weather_data_t *out)
     snprintf(url, sizeof(url),
              "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f"
              "&current=temperature_2m,weather_code"
-             "&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code"
+             "&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code,sunrise,sunset"
              "&timezone=auto&forecast_days=%d",
              latitude, longitude, WEATHER_FORECAST_DAYS);
 
@@ -81,8 +92,10 @@ esp_err_t weather_fetch(float latitude, float longitude, weather_data_t *out)
         cJSON *time_arr   = cJSON_GetObjectItem(daily, "time");
         cJSON *max_arr    = cJSON_GetObjectItem(daily, "temperature_2m_max");
         cJSON *min_arr    = cJSON_GetObjectItem(daily, "temperature_2m_min");
-        cJSON *precip_arr = cJSON_GetObjectItem(daily, "precipitation_probability_max");
-        cJSON *code_arr   = cJSON_GetObjectItem(daily, "weather_code");
+        cJSON *precip_arr  = cJSON_GetObjectItem(daily, "precipitation_probability_max");
+        cJSON *code_arr    = cJSON_GetObjectItem(daily, "weather_code");
+        cJSON *sunrise_arr = cJSON_GetObjectItem(daily, "sunrise");
+        cJSON *sunset_arr  = cJSON_GetObjectItem(daily, "sunset");
 
         if (cJSON_IsNumber(cur_temp) && cJSON_IsArray(time_arr) &&
             cJSON_IsArray(max_arr) && cJSON_IsArray(min_arr)) {
@@ -113,6 +126,8 @@ esp_err_t weather_fetch(float latitude, float longitude, weather_data_t *out)
             if (out->daily_count > 0) {
                 out->min_c = out->daily[0].min_c;
                 out->max_c = out->daily[0].max_c;
+                extract_hhmm(sunrise_arr, 0, out->sunrise, sizeof(out->sunrise));
+                extract_hhmm(sunset_arr,  0, out->sunset,  sizeof(out->sunset));
                 parse_ret  = ESP_OK;
             } else {
                 ESP_LOGW(TAG, "No usable daily entries");

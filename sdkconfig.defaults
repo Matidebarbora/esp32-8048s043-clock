@@ -34,3 +34,29 @@ CONFIG_LV_THEME_DEFAULT_TRANSITION_TIME=0
 # HTTPS (weather.cpp — Open-Meteo)
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+
+# Bluetooth — BLE only (ESP32-S3 has no classic BT radio). Bluedroid host is
+# the Kconfig default once BT_ENABLED is set; BT_BLE_ENABLED defaults on and
+# BT_CLASSIC_ENABLED is unavailable on this target, so no need to set those
+# explicitly. ancs_client.cpp uses it to bond with the iPhone and read ANCS
+# (Apple Notification Center Service) notifications.
+#
+# This target defaults to the BLE 5.0 extended-advertising API instead of
+# the legacy 4.2 esp_ble_gap_start_advertising()/start_scanning() calls —
+# the two can't be enabled together, so switch back to 4.2 (what
+# ancs_client.cpp uses).
+CONFIG_BT_ENABLED=y
+CONFIG_BT_BLE_50_FEATURES_SUPPORTED=n
+CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y
+
+# Running Wi-Fi + BLE + TLS together was starving internal RAM enough to
+# fail mid-handshake (mbedtls_ssl_setup returning -0x7F00 / alloc failed)
+# once the BT stack came up. Two independent fixes: let BT/BLE allocate its
+# buffers from PSRAM first instead of internal RAM, and make mbedtls
+# allocate its TX/RX buffers on demand (freed after use) instead of
+# reserving MBEDTLS_SSL_IN/OUT_CONTENT_LEN (16 KB/4 KB) up front per
+# connection. Also shrink the incoming buffer — Open-Meteo's JSON responses
+# are a few KB, nowhere near the 16 KB default.
+CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST=y
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=4096

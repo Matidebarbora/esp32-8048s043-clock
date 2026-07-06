@@ -2,6 +2,7 @@
 #include "lcd.h"
 #include "season_time_screen.h"
 #include "dimmer_screen.h"
+#include "notification_filter_screen.h"
 
 static lv_obj_t *s_clock_scr = nullptr;
 
@@ -22,6 +23,12 @@ static void on_dimmer_click(lv_event_t *e)
 {
     lv_obj_t *settings_scr = lv_obj_get_screen(lv_event_get_target(e));
     dimmer_screen_show(settings_scr);
+}
+
+static void on_notifications_click(lv_event_t *e)
+{
+    lv_obj_t *settings_scr = lv_obj_get_screen(lv_event_get_target(e));
+    notification_filter_screen_show(settings_scr);
 }
 
 void settings_screen_show(lv_obj_t *clock_scr)
@@ -61,6 +68,10 @@ void settings_screen_show(lv_obj_t *clock_scr)
     lv_obj_t *dimmer_btn = lv_list_add_btn(list, nullptr, "Dimmer");
     lv_obj_set_style_text_font(dimmer_btn, &lv_font_montserrat_28, 0);
     lv_obj_add_event_cb(dimmer_btn, on_dimmer_click, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *notif_btn = lv_list_add_btn(list, nullptr, "Notifications");
+    lv_obj_set_style_text_font(notif_btn, &lv_font_montserrat_28, 0);
+    lv_obj_add_event_cb(notif_btn, on_notifications_click, LV_EVENT_CLICKED, nullptr);
 
     lv_disp_load_scr(scr);
 }

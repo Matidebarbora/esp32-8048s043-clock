@@ -164,6 +164,14 @@ esp_err_t wifi_scan(wifi_ap_info_t **out_aps, uint16_t *out_count)
     *out_aps   = nullptr;
     *out_count = 0;
 
+    // esp_wifi_scan_start() fails immediately with ESP_ERR_WIFI_STATE if a
+    // connect attempt is already in progress on the driver — which happens
+    // routinely, since wifi_reconnect_task calls wifi_connect_any() every
+    // 10 s whenever Wi-Fi is down (the exact moment a user is likely to open
+    // this screen). Share s_wifi_op_mutex with connect so the scan simply
+    // waits its turn instead of racing and failing.
+    xSemaphoreTake(s_wifi_op_mutex, portMAX_DELAY);
+
     wifi_scan_config_t scan_cfg = {};
     scan_cfg.show_hidden = false;
 
@@ -171,6 +179,7 @@ esp_err_t wifi_scan(wifi_ap_info_t **out_aps, uint16_t *out_count)
     esp_err_t ret = esp_wifi_scan_start(&scan_cfg, true);  // blocking
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Scan start failed: %s", esp_err_to_name(ret));
+        xSemaphoreGive(s_wifi_op_mutex);
         return ret;
     }
 
@@ -178,13 +187,18 @@ esp_err_t wifi_scan(wifi_ap_info_t **out_aps, uint16_t *out_count)
     esp_wifi_scan_get_ap_num(&ap_count);
     if (ap_count == 0) {
         ESP_LOGI(TAG, "Scan found no networks");
+        xSemaphoreGive(s_wifi_op_mutex);
         return ESP_OK;
     }
 
     auto *records = (wifi_ap_record_t *)malloc(sizeof(wifi_ap_record_t) * ap_count);
-    if (!records) return ESP_ERR_NO_MEM;
+    if (!records) {
+        xSemaphoreGive(s_wifi_op_mutex);
+        return ESP_ERR_NO_MEM;
+    }
 
     ret = esp_wifi_scan_get_ap_records(&ap_count, records);
+    xSemaphoreGive(s_wifi_op_mutex);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Scan get records failed: %s", esp_err_to_name(ret));
         free(records);

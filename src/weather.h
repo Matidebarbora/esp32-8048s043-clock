@@ -17,6 +17,8 @@ typedef struct {
     float current_c;
     float max_c;         // today's max (== daily[0].max_c)
     int   weather_code;  // WMO code (see weather_code_description())
+    char  sunrise[6];    // "HH:MM", today, local time
+    char  sunset[6];     // "HH:MM", today, local time
     weather_daily_t daily[WEATHER_FORECAST_DAYS];
     int   daily_count;
 } weather_data_t;
