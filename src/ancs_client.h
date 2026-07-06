@@ -1,4 +1,5 @@
 #pragma once
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -18,6 +19,18 @@ extern "C" {
 // confirmation on the phone (no PIN, Just Works pairing). Everything else
 // happens automatically afterwards. Logs via ESP_LOGI, tag "ancs".
 void ancs_client_init(void);
+
+// True once the phone's physical BLE link is up (from ESP_GATTS_CONNECT_EVT
+// until ESP_GATTS_DISCONNECT_EVT) — doesn't require ANCS discovery to have
+// finished. Safe to call from any task; backed by a plain flag written from
+// the Bluedroid callback thread, same informal thread-safety as the rest of
+// this codebase's simple status flags (e.g. sd_card_is_mounted()).
+bool ancs_client_is_connected(void);
+
+// The connected phone's name, read from its GAP service (Device Name
+// characteristic, UUID 0x2A00) once available. Returns a fallback ("iPhone")
+// before that read completes or if the phone doesn't expose it.
+const char *ancs_client_get_device_name(void);
 
 #ifdef __cplusplus
 }

@@ -29,6 +29,12 @@ static const uint8_t ANCS_CONTROL_POINT_UUID_BE[16] = {
 static const uint8_t ANCS_DATA_SOURCE_UUID_BE[16] = {
     0x22, 0xEA, 0xC6, 0xE9, 0x24, 0xD6, 0x4B, 0xB5, 0xBE, 0x44, 0xB3, 0x6A, 0xCE, 0x7C, 0x7B, 0xFB};
 
+// Standard Bluetooth SIG 16-bit UUIDs (GAP service + its Device Name
+// characteristic) — used only to read the phone's display name for the
+// clock's UI, unrelated to ANCS itself.
+#define GAP_SVC_UUID         0x1800
+#define GAP_DEVICE_NAME_UUID 0x2A00
+
 static void uuid128_from_be(esp_bt_uuid_t *out, const uint8_t be[16])
 {
     out->len = ESP_UUID_LEN_128;
@@ -77,6 +83,17 @@ static uint16_t s_notif_source_cccd    = 0;
 static uint16_t s_data_source_handle   = 0;
 static uint16_t s_data_source_cccd     = 0;
 static uint16_t s_control_point_handle = 0;
+
+// GAP service discovery — read once per connection, purely to show the
+// phone's name in the clock's header. Independent of the ANCS handles above.
+static uint16_t s_gap_start_handle   = 0;
+static uint16_t s_gap_end_handle     = 0;
+static uint16_t s_device_name_handle = 0;
+
+// True from the physical link coming up (GATTS_CONNECT_EVT) until it drops
+// (GATTS_DISCONNECT_EVT) — read by main.cpp's header Bluetooth indicator.
+static bool s_connected = false;
+static char s_device_name[32] = "iPhone";  // fallback until the GAP read completes (or if it never does)
 
 // Data Source responses can arrive split across several notifications —
 // reassembled here before parsing.
@@ -265,13 +282,36 @@ static void write_cccd_enable(esp_gatt_if_t gattc_if, uint16_t char_handle)
                                     ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NO_MITM);
 }
 
+// Reads the phone's GAP Device Name characteristic — purely cosmetic (shown
+// in the clock's header), unrelated to ANCS. Not every phone/OS is
+// guaranteed to expose this, so s_device_name just keeps its "iPhone"
+// fallback if the characteristic isn't found or the read fails.
+static void resolve_device_name(esp_gatt_if_t gattc_if)
+{
+    esp_bt_uuid_t uuid;
+    uuid.len = ESP_UUID_LEN_16;
+    uuid.uuid.uuid16 = GAP_DEVICE_NAME_UUID;
+
+    esp_gattc_char_elem_t elem;
+    uint16_t count = 1;
+    esp_gatt_status_t st = esp_ble_gattc_get_char_by_uuid(
+        gattc_if, s_conn_id, s_gap_start_handle, s_gap_end_handle, uuid, &elem, &count);
+    if (st != ESP_GATT_OK || count == 0) {
+        ESP_LOGW(TAG, "Device Name characteristic not found (status=%d)", st);
+        return;
+    }
+    s_device_name_handle = elem.char_handle;
+    esp_ble_gattc_read_char(gattc_if, s_conn_id, s_device_name_handle, ESP_GATT_AUTH_REQ_NO_MITM);
+}
+
+// Searches every service on the phone (not just ANCS) so the same pass also
+// turns up the standard GAP service used to read its display name — see
+// ESP_GATTC_SEARCH_RES_EVT, which tells the two apart by UUID.
 static void maybe_start_ancs_discovery()
 {
     if (!s_bonded || !s_gattc_ready) return;
-    ESP_LOGI(TAG, "Discovering ANCS (gattc_if=%d conn_id=%d)", s_gattc_if, s_conn_id);
-    esp_bt_uuid_t ancs_uuid;
-    uuid128_from_be(&ancs_uuid, ANCS_SVC_UUID_BE);
-    esp_err_t search_err = esp_ble_gattc_search_service(s_gattc_if, s_conn_id, &ancs_uuid);
+    ESP_LOGI(TAG, "Discovering services (gattc_if=%d conn_id=%d)", s_gattc_if, s_conn_id);
+    esp_err_t search_err = esp_ble_gattc_search_service(s_gattc_if, s_conn_id, nullptr);
     if (search_err != ESP_OK)
         ESP_LOGE(TAG, "search_service call failed: %s", esp_err_to_name(search_err));
 }
@@ -284,6 +324,9 @@ static void reset_link_state()
     s_data_source_handle = s_data_source_cccd = 0;
     s_control_point_handle = 0;
     s_data_buf_len = 0;
+    s_gap_start_handle = s_gap_end_handle = 0;
+    s_device_name_handle = 0;
+    strlcpy(s_device_name, "iPhone", sizeof(s_device_name));
 }
 
 // ── GAP: advertising + pairing/bonding ───────────────────────────────────────
@@ -342,6 +385,7 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
 
         case ESP_GATTS_CONNECT_EVT:
             memcpy(s_remote_bda, param->connect.remote_bda, sizeof(esp_bd_addr_t));
+            s_connected = true;
             ESP_LOGI(TAG, "Physical link up — requesting pairing and attaching GATT client");
             // ANCS needs an encrypted, bonded link, but nothing about our own
             // (service-less) GATT server forces the phone to encrypt on its
@@ -358,6 +402,7 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
 
         case ESP_GATTS_DISCONNECT_EVT:
             ESP_LOGW(TAG, "iPhone disconnected — resuming advertising");
+            s_connected = false;
             reset_link_state();
             esp_ble_gap_start_advertising(&adv_params);
             break;
@@ -387,23 +432,49 @@ static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_
             maybe_start_ancs_discovery();
             break;
 
-        case ESP_GATTC_SEARCH_RES_EVT:
+        case ESP_GATTC_SEARCH_RES_EVT: {
+            // Unfiltered search now (see maybe_start_ancs_discovery) — every
+            // service on the phone shows up here, so tell ANCS and GAP apart
+            // by comparing the actual UUID, not just its length.
+            auto &uuid = param->search_res.srvc_id.uuid;
             ESP_LOGI(TAG, "Search result: uuid_len=%d handles %d-%d",
-                     param->search_res.srvc_id.uuid.len, param->search_res.start_handle, param->search_res.end_handle);
-            if (param->search_res.srvc_id.uuid.len == ESP_UUID_LEN_128) {
+                     uuid.len, param->search_res.start_handle, param->search_res.end_handle);
+
+            esp_bt_uuid_t ancs_uuid;
+            uuid128_from_be(&ancs_uuid, ANCS_SVC_UUID_BE);
+            if (uuid.len == ESP_UUID_LEN_128 && memcmp(uuid.uuid.uuid128, ancs_uuid.uuid.uuid128, 16) == 0) {
                 s_ancs_start_handle = param->search_res.start_handle;
                 s_ancs_end_handle   = param->search_res.end_handle;
                 ESP_LOGI(TAG, "Found ANCS service, handles %d-%d", s_ancs_start_handle, s_ancs_end_handle);
+            } else if (uuid.len == ESP_UUID_LEN_16 && uuid.uuid.uuid16 == GAP_SVC_UUID) {
+                s_gap_start_handle = param->search_res.start_handle;
+                s_gap_end_handle   = param->search_res.end_handle;
+                ESP_LOGI(TAG, "Found GAP service, handles %d-%d", s_gap_start_handle, s_gap_end_handle);
             }
             break;
+        }
 
         case ESP_GATTC_SEARCH_CMPL_EVT:
             ESP_LOGI(TAG, "Service search complete: status=%d", param->search_cmpl.status);
-            if (s_ancs_start_handle == 0) {
+            if (s_ancs_start_handle == 0)
                 ESP_LOGW(TAG, "ANCS service not found on this connection");
-                break;
+            else
+                resolve_ancs_characteristics(gattc_if);
+
+            if (s_gap_start_handle == 0)
+                ESP_LOGW(TAG, "GAP service not found — keeping the \"iPhone\" fallback name");
+            else
+                resolve_device_name(gattc_if);
+            break;
+
+        case ESP_GATTC_READ_CHAR_EVT:
+            if (param->read.handle == s_device_name_handle && param->read.status == ESP_GATT_OK) {
+                size_t len = param->read.value_len < sizeof(s_device_name) - 1
+                                 ? param->read.value_len : sizeof(s_device_name) - 1;
+                memcpy(s_device_name, param->read.value, len);
+                s_device_name[len] = '\0';
+                ESP_LOGI(TAG, "Device name: %s", s_device_name);
             }
-            resolve_ancs_characteristics(gattc_if);
             break;
 
         case ESP_GATTC_REG_FOR_NOTIFY_EVT:
@@ -481,4 +552,14 @@ void ancs_client_init(void)
     esp_ble_gap_config_adv_data(&adv_data);
 
     ESP_LOGI(TAG, "BLE stack up — advertising as \"%s\", waiting for iPhone to pair", DEVICE_NAME);
+}
+
+bool ancs_client_is_connected(void)
+{
+    return s_connected;
+}
+
+const char *ancs_client_get_device_name(void)
+{
+    return s_device_name;
 }

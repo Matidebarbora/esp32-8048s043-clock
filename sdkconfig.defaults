@@ -13,6 +13,42 @@ CONFIG_LV_CONF_SKIP=y
 CONFIG_LV_COLOR_DEPTH_16=y
 CONFIG_LV_THEME_DEFAULT_DARK=y
 
+# LVGL's own internal memory pool (separate from the general heap/PSRAM —
+# every lv_obj_t, style, and internal render buffer comes out of this one
+# block, allocated once at lv_init()). The 32 KB default was fine for a
+# simple clock face, but this UI has grown a lot (stocks screen,
+# notification/stock cards, photo slideshow, forecast screen's ~50 objects
+# built at once) and started hitting "lv_mem_realloc: couldn't allocate
+# memory" / "Out of memory, can't allocate a new buffer" opening the 5-day
+# forecast.
+#
+# First attempt at fixing this (128 KB, left at the *static-array* default
+# storage) bricked the board on boot: that array lands in internal RAM by
+# default, and 128 KB of it left too little contiguous internal RAM for the
+# RGB panel's own bounce buffer — esp_lcd_new_rgb_panel() failed with
+# ESP_ERR_NO_MEM before the display ever came up (boot-loop, screen never
+# lights). CONFIG_LV_MEM_SIZE_KILOBYTES's own Kconfig range (2-128) caps how
+# far this can go anyway *and* it's all internal RAM regardless.
+#
+# Second attempt moved the pool to PSRAM instead (LV_MEM_POOL_ALLOC in
+# platformio.ini's build_flags) — fixed the crash with headroom to spare,
+# but PSRAM's higher latency made the whole UI visibly slower/flickerier
+# (every lv_obj_t, style, and render buffer lives in this pool, so its
+# access speed affects everything, not just the forecast screen).
+#
+# Third attempt tried splitting the difference — back to a static
+# internal-RAM array, but only 64 KB (double the original default,
+# comfortably under the 128 KB that starved the bounce buffer) — this
+# was *worse* than the 128 KB failure: the board didn't even boot-loop
+# with a clean error, it hung completely right after "Install RGB panel
+# driver", no crash log, nothing. Internal RAM on this board is evidently
+# tight enough that guessing at "smaller but still static" sizes isn't
+# safe — reverted back to the PSRAM-backed pool (platformio.ini), which is
+# the only configuration of these three that's actually been confirmed
+# stable. Don't re-attempt a static-array size between 32 and 128 without
+# a real way to verify available contiguous internal RAM first.
+CONFIG_LV_MEM_SIZE_KILOBYTES=128
+
 # Fonts used by the clock UI
 CONFIG_LV_FONT_MONTSERRAT_14=y
 CONFIG_LV_FONT_MONTSERRAT_16=y
@@ -90,6 +126,13 @@ CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=8192
 # the 8 MB PSRAM was free. Lowering the threshold lets mid-size allocations
 # like these spill into PSRAM instead of fighting Wi-Fi/BT for the same
 # scarce internal SRAM.
+#
+# CORRECTION, found later (see CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC further
+# down): this threshold never actually applied to mbedtls's dynamic
+# buffers — they use an allocator that hard-codes MALLOC_CAP_INTERNAL,
+# bypassing this entirely. It's harmless and left in place (still useful
+# for whatever *does* go through plain malloc()), but it was not the real
+# fix for the failures described below.
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=1024
 
 # With that fixed, Yahoo's TLS termination (fronted by a CDN with a bigger
@@ -99,3 +142,35 @@ CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=1024
 # smaller handshake messages, not a CDN-fronted server's larger ones.
 # Bumped back up to 8192; still freed after use (CONFIG_MBEDTLS_DYNAMIC_BUFFER)
 # and, being over the 1024-byte threshold above, still comes from PSRAM.
+
+# A fourth internal-RAM contention spot, same family as the SD SPI DMA
+# buffer (sd_card.cpp): hardware AES acceleration encrypts/decrypts TLS
+# traffic via DMA (port/aes/dma/esp_aes_dma_core.c), which — like the SD
+# driver — needs DMA-capable memory and can't be redirected to PSRAM the way
+# mbedtls's own buffers were above. With Wi-Fi + BLE + SD all competing for
+# that same scarce internal RAM, a handshake landing at the wrong moment
+# failed with "esp-aes: Failed to allocate memory". Switching to software
+# AES sidesteps the DMA requirement entirely — at 160MHz there's a small
+# CPU cost, but requests here are infrequent and a few KB each, so it's not
+# noticeable.
+CONFIG_MBEDTLS_HARDWARE_AES=n
+
+# The actual root cause of every "Dynamic Impl: alloc(...) failed" above,
+# finally found: mbedtls_calloc() (used throughout mbedtls, including the
+# dynamic SSL buffers) maps to esp_mbedtls_mem_calloc() in ESP-IDF's
+# port/esp_mem.c, and with the default CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC=y,
+# that function calls heap_caps_calloc(..., MALLOC_CAP_INTERNAL) — an
+# explicit, unconditional demand for internal RAM. CONFIG_SPIRAM_MALLOC_
+# ALWAYSINTERNAL (above) never touched this: that threshold only steers
+# generic, capability-less malloc()'s automatic placement, and has zero
+# effect on a call that already hard-codes MALLOC_CAP_INTERNAL. This is why
+# the failure kept resurfacing under slightly more load no matter how far
+# that threshold was lowered — it was never the actual lever.
+# CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC switches esp_mbedtls_mem_calloc() to
+# MALLOC_CAP_SPIRAM instead, which is the real fix: every mbedtls buffer
+# (SSL session/transform/handshake state, not just the dynamic TX/RX
+# buffers) now comes from the 8 MB of PSRAM instead of competing with Wi-Fi/
+# BLE/SD for internal RAM. If "Dynamic Impl" alloc failures ever show up
+# again after this, the bottleneck is genuine PSRAM exhaustion, not this
+# internal-vs-external routing — look elsewhere.
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y

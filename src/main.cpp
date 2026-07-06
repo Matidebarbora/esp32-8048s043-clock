@@ -68,6 +68,7 @@ static void build_connect_candidates()
 // ── UI state ──────────────────────────────────────────────────────────────────
 static lv_obj_t *g_time_digits[8];  // H H : M M : S S — rendered as images, see time_digits_data.h
 static lv_obj_t *g_date_label;
+static lv_obj_t *g_bt_label;  // header Bluetooth indicator — hidden until a phone connects
 static lv_obj_t *g_status_label;
 static lv_obj_t *g_wifi_icon;  // header Wi-Fi button icon — green when connected, red otherwise
 static lv_obj_t *g_temp_min_label;
@@ -428,13 +429,29 @@ static void build_ui(lv_obj_t *scr)
     lv_obj_add_event_cb(wifi_btn, on_wifi_icon_click, LV_EVENT_CLICKED, scr);
 
     // Sits where the Wi-Fi SSID label used to be, top-left of the header.
+    // Sized to its own content (not a fixed width) so the Bluetooth
+    // indicator below can sit right after it instead of floating in
+    // whatever space a fixed-width box left over.
     g_date_label = lv_label_create(scr);
     lv_obj_set_style_text_font(g_date_label, &lv_font_montserrat_24, 0);
     lv_obj_set_style_text_color(g_date_label, lv_color_make(170, 170, 175), 0);
-    lv_obj_set_width(g_date_label, 400);
-    lv_label_set_long_mode(g_date_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(g_date_label, LV_SIZE_CONTENT);
     lv_obj_align(g_date_label, LV_ALIGN_TOP_LEFT, CARD_MARGIN, 16);  // left edge lines up with the cards below
     lv_label_set_text(g_date_label, "");
+
+    // Bluetooth indicator: icon + connected phone's name, all in blue,
+    // centered across the top of the screen. Hidden until ancs_client
+    // reports a phone connected (see wifi_status_tick_cb, which also polls
+    // this every 2s).
+    g_bt_label = lv_label_create(scr);
+    lv_obj_set_style_text_font(g_bt_label, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(g_bt_label, lv_color_make(90, 160, 255), 0);
+    lv_obj_set_width(g_bt_label, 220);
+    lv_label_set_long_mode(g_bt_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(g_bt_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(g_bt_label, LV_ALIGN_TOP_MID, 0, 16);
+    lv_label_set_text(g_bt_label, "");
+    lv_obj_add_flag(g_bt_label, LV_OBJ_FLAG_HIDDEN);
 
     lv_obj_t *gear = lv_btn_create(scr);
     lv_obj_set_size(gear, 44, 44);
@@ -827,12 +844,21 @@ static void wifi_cb(const char *ssid, size_t index, size_t total)
 // regardless of whether the connection came from startup or the settings
 // screen. Runs inside lv_task_handler — no mutex needed. Which network it's
 // connected to is shown inside the Wi-Fi settings screen, not the header.
+// Also polls the BLE/ANCS connection state for the Bluetooth indicator next
+// to the date — same cheap "just re-set it every tick" approach.
 static void wifi_status_tick_cb(lv_timer_t *)
 {
     char ssid[33];
     bool connected = wifi_get_connected_ssid(ssid, sizeof(ssid));
     lv_obj_set_style_text_color(g_wifi_icon,
         connected ? lv_color_make(60, 200, 100) : lv_color_make(150, 70, 70), 0);
+
+    if (ancs_client_is_connected()) {
+        lv_label_set_text_fmt(g_bt_label, LV_SYMBOL_BLUETOOTH "  %s", ancs_client_get_device_name());
+        lv_obj_clear_flag(g_bt_label, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(g_bt_label, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 // If the Wi-Fi connection is ever down (failed at boot, or dropped later),
@@ -1008,6 +1034,11 @@ static void stocks_task(void *)
     char ssid[33];
     while (!wifi_get_connected_ssid(ssid, sizeof(ssid)))
         vTaskDelay(pdMS_TO_TICKS(2000));
+
+    // Same DHCP/DNS grace period as weather_task — wifi_get_connected_ssid()
+    // only reports association, not IP-level readiness. Without this, the
+    // first fetch races the AP-hopping/DHCP dance and fails DNS resolution.
+    vTaskDelay(pdMS_TO_TICKS(3000));
 
     while (true) {
         const stocks_store_entry_t *pinned;
