@@ -41,6 +41,16 @@ static void on_home_click(lv_event_t *e)
 
 static void wifi_scan_task(void *)
 {
+    // wifi_settings_show() just triggered a full-screen LVGL redraw (new
+    // screen via lv_disp_load_scr()); that redraw is still pending when this
+    // task starts. Give it a head start before kicking off Wi-Fi scanning —
+    // the scan's RF/DMA activity landing in the middle of the panel's
+    // full 800x480 SW re-render is the same bus-bandwidth-starvation
+    // scenario documented in CLAUDE.md's RGB panel timing notes (there seen
+    // with the on-screen keyboard); avoid stacking a second heavy-load
+    // source on top of it.
+    vTaskDelay(pdMS_TO_TICKS(150));
+
     wifi_ap_info_t *aps   = nullptr;
     uint16_t        count = 0;
     esp_err_t       ret   = wifi_scan(&aps, &count);
@@ -90,6 +100,18 @@ void wifi_settings_show(lv_obj_t *clock_scr)
     lv_obj_set_style_text_font(title, &lv_font_montserrat_24, 0);
     lv_obj_set_style_text_color(title, lv_color_white(), 0);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 16, 16);
+
+    lv_obj_t *status = lv_label_create(scr);
+    lv_obj_set_style_text_font(status, &lv_font_montserrat_16, 0);
+    lv_obj_align(status, LV_ALIGN_TOP_LEFT, 16, 54);
+    char ssid[33];
+    if (wifi_get_connected_ssid(ssid, sizeof(ssid))) {
+        lv_label_set_text_fmt(status, LV_SYMBOL_WIFI "  Connected to %s", ssid);
+        lv_obj_set_style_text_color(status, lv_color_make(60, 200, 100), 0);
+    } else {
+        lv_label_set_text(status, LV_SYMBOL_WIFI "  Not connected");
+        lv_obj_set_style_text_color(status, lv_color_make(150, 70, 70), 0);
+    }
 
     lv_obj_t *home = lv_btn_create(scr);
     lv_obj_set_size(home, 44, 44);

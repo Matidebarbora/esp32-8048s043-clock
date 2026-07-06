@@ -30,6 +30,8 @@
 #include "notification_icon.h"
 #include "es_fonts.h"
 #include "notification_filter_settings.h"
+#include "stocks.h"
+#include "stocks_store.h"
 
 static const char *TAG = "main";
 
@@ -65,7 +67,7 @@ static void build_connect_candidates()
 static lv_obj_t *g_time_digits[8];  // H H : M M : S S — rendered as images, see time_digits_data.h
 static lv_obj_t *g_date_label;
 static lv_obj_t *g_status_label;
-static lv_obj_t *g_wifi_label;
+static lv_obj_t *g_wifi_icon;  // header Wi-Fi button icon — green when connected, red otherwise
 static lv_obj_t *g_temp_min_label;
 static lv_obj_t *g_temp_now_label;
 static lv_obj_t *g_temp_max_label;
@@ -78,8 +80,11 @@ static lv_obj_t *g_sun_marker;
 static lv_obj_t *g_sunrise_label;
 static lv_obj_t *g_sunset_label;
 static lv_obj_t *g_notif_card;
+static lv_obj_t *g_stock_card;
 
 #define NOTIF_CARD_ROWS 3
+#define STOCK_CARD_ROWS 3
+#define STOCK_ROW_HEIGHT 26  // matches NOTIF_CARD_ROW_HEIGHT — same row rhythm, different card
 
 // Horizontal margin left/right of every card, so the dark background shows
 // as a frame around them.
@@ -321,6 +326,84 @@ static void on_notification_store_changed()
     lvgl_release();
 }
 
+// One row in the stock card: up/down arrow (colored) + symbol + price, all
+// in white except the arrow. Neutral gray arrow and "--" price while a quote
+// hasn't been fetched yet (valid == false).
+static void build_stock_card_row(lv_obj_t *parent, const stock_quote_t *q)
+{
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_remove_style_all(row);
+    lv_obj_clear_flag(row, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
+    lv_obj_set_size(row, LV_PCT(100), STOCK_ROW_HEIGHT);
+    lv_obj_set_layout(row, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t *left = lv_obj_create(row);
+    lv_obj_remove_style_all(left);
+    lv_obj_clear_flag(left, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
+    lv_obj_set_size(left, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_layout(left, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(left, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(left, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(left, 6, 0);
+
+    lv_obj_t *arrow = lv_label_create(left);
+    lv_label_set_text(arrow, q->valid && !q->up ? LV_SYMBOL_DOWN : LV_SYMBOL_UP);
+    lv_obj_set_style_text_font(arrow, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(arrow,
+        !q->valid ? lv_color_make(120, 120, 125)
+        : q->up   ? lv_color_make(60, 200, 100)
+                  : lv_color_make(200, 70, 70), 0);
+
+    lv_obj_t *sym = lv_label_create(left);
+    lv_label_set_text(sym, q->symbol);
+    lv_obj_set_style_text_font(sym, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(sym, lv_color_white(), 0);
+
+    lv_obj_t *price = lv_label_create(row);
+    char buf[16];
+    if (q->valid) snprintf(buf, sizeof(buf), "%.2f", q->price);
+    else strlcpy(buf, "--", sizeof(buf));
+    lv_label_set_text(price, buf);
+    lv_obj_set_style_text_font(price, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(price, lv_color_white(), 0);
+}
+
+// A row slot with no pinned stock yet — same fixed height as a real row, so
+// the card's total height never changes as stocks are pinned/unpinned.
+static void build_stock_card_empty_row(lv_obj_t *parent, const char *text)
+{
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_remove_style_all(row);
+    lv_obj_clear_flag(row, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
+    lv_obj_set_size(row, LV_PCT(100), STOCK_ROW_HEIGHT);
+    if (!text) return;
+
+    lv_obj_set_layout(row, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t *lbl = lv_label_create(row);
+    lv_label_set_text(lbl, text);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(lbl, lv_color_make(120, 120, 125), 0);
+}
+
+// Rebuilds the stock card from quotes (up to STOCK_CARD_ROWS entries).
+// Always renders exactly STOCK_CARD_ROWS row slots, same fixed-height-card
+// rationale as update_notification_card(). Called from stocks_task (not the
+// LVGL task) — caller must wrap with lvgl_acquire()/lvgl_release().
+static void update_stock_card(const stock_quote_t *quotes, size_t count)
+{
+    lv_obj_clean(g_stock_card);
+
+    for (size_t i = 0; i < STOCK_CARD_ROWS; i++) {
+        if (i < count)
+            build_stock_card_row(g_stock_card, &quotes[i]);
+        else
+            build_stock_card_empty_row(g_stock_card, (count == 0 && i == 0) ? "No stocks pinned" : nullptr);
+    }
+}
+
 static void build_ui(lv_obj_t *scr)
 {
     lv_obj_set_style_bg_color(scr, lv_color_make(8, 8, 10), 0);
@@ -329,11 +412,21 @@ static void build_ui(lv_obj_t *scr)
     lv_obj_set_size(wifi_btn, 44, 44);
     lv_obj_align(wifi_btn, LV_ALIGN_TOP_RIGHT, -10, 10);
     lv_obj_set_style_bg_opa(wifi_btn, LV_OPA_30, 0);
-    lv_obj_t *wifi_icon = lv_label_create(wifi_btn);
-    lv_label_set_text(wifi_icon, LV_SYMBOL_WIFI);
-    lv_obj_set_style_text_font(wifi_icon, &lv_font_montserrat_24, 0);
-    lv_obj_center(wifi_icon);
+    g_wifi_icon = lv_label_create(wifi_btn);
+    lv_label_set_text(g_wifi_icon, LV_SYMBOL_WIFI);
+    lv_obj_set_style_text_font(g_wifi_icon, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(g_wifi_icon, lv_color_make(150, 70, 70), 0);  // red until first status tick confirms a connection
+    lv_obj_center(g_wifi_icon);
     lv_obj_add_event_cb(wifi_btn, on_wifi_icon_click, LV_EVENT_CLICKED, scr);
+
+    // Sits where the Wi-Fi SSID label used to be, top-left of the header.
+    g_date_label = lv_label_create(scr);
+    lv_obj_set_style_text_font(g_date_label, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(g_date_label, lv_color_make(170, 170, 175), 0);
+    lv_obj_set_width(g_date_label, 400);
+    lv_label_set_long_mode(g_date_label, LV_LABEL_LONG_DOT);
+    lv_obj_align(g_date_label, LV_ALIGN_TOP_LEFT, 16, 18);
+    lv_label_set_text(g_date_label, "");
 
     lv_obj_t *gear = lv_btn_create(scr);
     lv_obj_set_size(gear, 44, 44);
@@ -355,31 +448,24 @@ static void build_ui(lv_obj_t *scr)
     lv_obj_add_event_cb(bulb_btn, on_brightness_click, LV_EVENT_CLICKED, nullptr);
     refresh_bulb_icon();
 
-    g_wifi_label = lv_label_create(scr);
-    lv_obj_set_style_text_font(g_wifi_label, &lv_font_montserrat_16, 0);
-    lv_obj_set_width(g_wifi_label, 280);
-    lv_label_set_long_mode(g_wifi_label, LV_LABEL_LONG_DOT);
-    lv_obj_align(g_wifi_label, LV_ALIGN_TOP_LEFT, 16, 18);
-    lv_label_set_text(g_wifi_label, "");
-
-    // ── Time + date card ─────────────────────────────────────────────────────
-    // Single row (time left-aligned, date after it) instead of the previous
-    // two stacked rows — shorter card, freeing vertical space for the
-    // notification card below to show more than one row.
-    //
-    // The date is pulled out of the flex flow (LV_OBJ_FLAG_IGNORE_LAYOUT) and
-    // pinned via lv_obj_align instead — individual time digit images vary in
-    // width (e.g. "1" vs "8"), so leaving it flex-flowed right after time_row
-    // would shift it left/right every second. A fixed card height (matching
-    // the digit images exactly) makes BOTTOM_RIGHT alignment line its bottom
-    // edge up with the bottom of the time digits, not just visually close.
+    // ── Time card (fixed position/size, left side of the header row) ───────────
+    // Width is fixed (not LV_SIZE_CONTENT) so it doesn't jitter as digit
+    // images of varying width (e.g. "1" vs "8") cycle through — sized to fit
+    // the widest possible HH:MM:SS combination (six digits up to 60px each +
+    // two 22px colons = 404px of images) plus the card's own horizontal
+    // padding, with a little headroom.
     const int time_digit_height = 70;
+    const int header_row_h      = time_digit_height + 2 * 16;                  // 102
+    const int header_row_y      = LCD_V_RES / 2 - 119 - header_row_h / 2;      // matches the old CENTER/-119 vertical position
+    const int header_gap        = 12;                                          // gap between header cards, and down to the weather card
+    const int time_card_w       = 470;
+
     lv_obj_t *time_card = make_card(scr, LV_FLEX_FLOW_ROW);
+    lv_obj_set_size(time_card, time_card_w, header_row_h);
     lv_obj_set_style_pad_hor(time_card, 24, 0);
     lv_obj_set_style_pad_ver(time_card, 16, 0);
-    lv_obj_set_flex_align(time_card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_height(time_card, time_digit_height + 2 * 16);
-    lv_obj_align(time_card, LV_ALIGN_CENTER, 0, -119);
+    lv_obj_set_flex_align(time_card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_align(time_card, LV_ALIGN_TOP_LEFT, CARD_MARGIN, header_row_y);
 
     lv_obj_t *time_row = lv_obj_create(time_card);
     lv_obj_remove_style_all(time_row);
@@ -388,7 +474,7 @@ static void build_ui(lv_obj_t *scr)
     lv_obj_set_layout(time_row, LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(time_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(time_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(time_row, 2, 0);
+    lv_obj_set_style_pad_column(time_row, 0, 0);
 
     static const char PLACEHOLDER[9] = "--:--:--";
     for (int i = 0; i < 8; i++) {
@@ -396,12 +482,17 @@ static void build_ui(lv_obj_t *scr)
         lv_img_set_src(g_time_digits[i], time_char_img(PLACEHOLDER[i]));
     }
 
-    g_date_label = lv_label_create(time_card);
-    lv_obj_set_style_text_font(g_date_label, &lv_font_montserrat_24, 0);
-    lv_obj_set_style_text_color(g_date_label, lv_color_make(170, 170, 175), 0);
-    lv_obj_add_flag(g_date_label, LV_OBJ_FLAG_IGNORE_LAYOUT);
-    lv_obj_align(g_date_label, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
-    lv_label_set_text(g_date_label, "");
+    // ── Stock card: fills the rest of the header row, right of the time card.
+    // Up to STOCK_CARD_ROWS pinned symbols, one compact row each — rebuilt
+    // from scratch on every update (see update_stock_card()), same
+    // clean+rebuild pattern as the notification card below.
+    g_stock_card = make_card(scr, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_size(g_stock_card, LCD_H_RES - 2 * CARD_MARGIN - time_card_w - header_gap, header_row_h);
+    lv_obj_set_style_pad_hor(g_stock_card, 16, 0);
+    lv_obj_set_style_pad_ver(g_stock_card, 6, 0);
+    lv_obj_set_style_pad_row(g_stock_card, 4, 0);
+    lv_obj_set_flex_align(g_stock_card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_align_to(g_stock_card, time_card, LV_ALIGN_OUT_RIGHT_MID, header_gap, 0);
 
     // ── Weather card ─────────────────────────────────────────────────────────
     // weather_card is a ROW: [left_spacer] [middle_col] [right_spacer].
@@ -418,7 +509,9 @@ static void build_ui(lv_obj_t *scr)
     lv_obj_set_style_pad_top(weather_card, 6, 0);
     lv_obj_set_style_pad_bottom(weather_card, 10, 0);
     lv_obj_set_style_pad_column(weather_card, 24, 0);  // gap between the 3 top-level groups
-    lv_obj_align_to(weather_card, time_card, LV_ALIGN_OUT_BOTTOM_MID, 0, 12);
+    // Anchored to the header row's fixed geometry (not time_card, which no
+    // longer spans the full width) so it stays centered under both header cards.
+    lv_obj_align(weather_card, LV_ALIGN_TOP_MID, 0, header_row_y + header_row_h + header_gap);
     // Tappable: opens the 5-day forecast screen. Give it a subtle pressed
     // color so it reads as tappable.
     lv_obj_set_style_bg_color(weather_card, lv_color_make(36, 36, 42), LV_STATE_PRESSED);
@@ -623,7 +716,8 @@ static void build_ui(lv_obj_t *scr)
     lv_obj_align(g_status_label, LV_ALIGN_BOTTOM_MID, 0, -12);
     lv_label_set_text(g_status_label, "");
 
-    update_notification_card();  // initial empty state
+    update_notification_card();     // initial empty state
+    update_stock_card(nullptr, 0);  // initial empty state
 }
 
 // Tracks the last (weather_code, is_night) pair the Group-1 icon was built
@@ -720,17 +814,14 @@ static void wifi_cb(const char *ssid, size_t index, size_t total)
 
 // Polls the actual Wi-Fi association state so the header reflects reality
 // regardless of whether the connection came from startup or the settings
-// screen. Runs inside lv_task_handler — no mutex needed.
+// screen. Runs inside lv_task_handler — no mutex needed. Which network it's
+// connected to is shown inside the Wi-Fi settings screen, not the header.
 static void wifi_status_tick_cb(lv_timer_t *)
 {
     char ssid[33];
-    if (wifi_get_connected_ssid(ssid, sizeof(ssid))) {
-        lv_label_set_text_fmt(g_wifi_label, LV_SYMBOL_WIFI " %s", ssid);
-        lv_obj_set_style_text_color(g_wifi_label, lv_color_make(60, 200, 100), 0);
-    } else {
-        lv_label_set_text(g_wifi_label, LV_SYMBOL_WIFI " No connection");
-        lv_obj_set_style_text_color(g_wifi_label, lv_color_make(150, 70, 70), 0);
-    }
+    bool connected = wifi_get_connected_ssid(ssid, sizeof(ssid));
+    lv_obj_set_style_text_color(g_wifi_icon,
+        connected ? lv_color_make(60, 200, 100) : lv_color_make(150, 70, 70), 0);
 }
 
 // If the Wi-Fi connection is ever down (failed at boot, or dropped later),
@@ -886,6 +977,46 @@ static void weather_task(void *)
     }
 }
 
+static TaskHandle_t s_stocks_task_handle = nullptr;
+
+// Called from stocks_screen.cpp (via stocks_store_set_changed_cb) whenever a
+// symbol is pinned/unpinned — same edge-triggered wake pattern as
+// on_dimmer_settings_changed(), so the card updates immediately instead of
+// waiting up to a minute for the next periodic refresh.
+static void on_stocks_store_changed()
+{
+    if (s_stocks_task_handle) xTaskNotifyGive(s_stocks_task_handle);
+}
+
+// Waits for Wi-Fi, then fetches quotes for the pinned symbols every 60 s (or
+// immediately after a pin/unpin — see on_stocks_store_changed()). Runs on
+// its own task since each HTTPS request blocks; UI updates go through
+// lvgl_acquire().
+static void stocks_task(void *)
+{
+    char ssid[33];
+    while (!wifi_get_connected_ssid(ssid, sizeof(ssid)))
+        vTaskDelay(pdMS_TO_TICKS(2000));
+
+    while (true) {
+        const stocks_store_entry_t *pinned;
+        size_t pinned_count = stocks_store_get_all(&pinned);
+        if (pinned_count > STOCK_CARD_ROWS) pinned_count = STOCK_CARD_ROWS;
+
+        stock_quote_t quotes[STOCK_CARD_ROWS];
+        for (size_t i = 0; i < pinned_count; i++) {
+            if (stock_quote_fetch(pinned[i].symbol, &quotes[i]) != ESP_OK)
+                ESP_LOGW(TAG, "Quote fetch failed for %s", pinned[i].symbol);
+        }
+
+        lvgl_acquire();
+        update_stock_card(quotes, pinned_count);
+        lvgl_release();
+
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(60 * 1000));  // recheck every 60s, or sooner if notified
+    }
+}
+
 extern "C" void app_main(void)
 {
     // Must run before ancs_client_init() — Bluedroid needs NVS up front to
@@ -934,7 +1065,11 @@ extern "C" void app_main(void)
 
     notification_store_set_changed_cb(on_notification_store_changed);
 
+    stocks_store_init();
+    stocks_store_set_changed_cb(on_stocks_store_changed);
+
     xTaskCreate(weather_task, "weather", 8192, nullptr, tskIDLE_PRIORITY + 1, nullptr);
+    xTaskCreate(stocks_task, "stocks", 8192, nullptr, tskIDLE_PRIORITY + 1, &s_stocks_task_handle);
     xTaskCreate(wifi_reconnect_task, "wifi_reconnect", 4096, nullptr, tskIDLE_PRIORITY + 1, nullptr);
     xTaskCreate(dimmer_task, "dimmer", 3072, nullptr, tskIDLE_PRIORITY + 1, &s_dimmer_task_handle);
 
