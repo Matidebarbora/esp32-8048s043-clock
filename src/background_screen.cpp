@@ -45,20 +45,32 @@ static void build_option_row(lv_obj_t *parent, int idx, bool is_last)
     lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
     lv_obj_set_style_bg_color(row, lv_color_make(36, 36, 42), LV_STATE_PRESSED);
     lv_obj_set_style_bg_opa(row, LV_OPA_COVER, LV_STATE_PRESSED);
-    if (!is_last) {
-        lv_obj_set_style_border_width(row, 1, 0);
-        lv_obj_set_style_border_side(row, LV_BORDER_SIDE_BOTTOM, 0);
-        lv_obj_set_style_border_color(row, lv_color_make(46, 46, 52), 0);
-    }
     lv_obj_add_event_cb(row, on_option_click, LV_EVENT_CLICKED, (void *)(intptr_t)idx);
+
+    // Plain 1px filled rect instead of a bottom border — border-side drawing
+    // costs an extra anti-aliased pass per row, per full-screen redraw,
+    // which full_refresh (required for this panel's PSRAM double buffer —
+    // see CLAUDE.md's RGB panel timing notes) triggers on every scroll-drag
+    // frame. A flat rect is a much cheaper draw op for the same look.
+    if (!is_last) {
+        lv_obj_t *divider = lv_obj_create(row);
+        lv_obj_remove_style_all(divider);
+        lv_obj_add_flag(divider, LV_OBJ_FLAG_IGNORE_LAYOUT);  // row is a flex container; position by hand, not as a flex item
+        lv_obj_clear_flag(divider, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
+        lv_obj_set_size(divider, LV_PCT(100), 1);
+        lv_obj_set_style_bg_color(divider, lv_color_make(46, 46, 52), 0);
+        lv_obj_set_style_bg_opa(divider, LV_OPA_COVER, 0);
+        lv_obj_align(divider, LV_ALIGN_BOTTOM_MID, 0, 0);
+    }
 
     lv_obj_t *swatch = lv_obj_create(row);
     lv_obj_remove_style_all(swatch);
     lv_obj_clear_flag(swatch, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
     lv_obj_set_size(swatch, SWATCH_W, SWATCH_H);
-    lv_obj_set_style_radius(swatch, 8, 0);
-    lv_obj_set_style_border_width(swatch, 1, 0);
-    lv_obj_set_style_border_color(swatch, lv_color_make(60, 60, 66), 0);
+    // Square corners, no border — every rounded/outlined edge is one more
+    // anti-aliased draw pass per row, per full-screen redraw (see the
+    // scroll-perf comment on s_list below).
+    lv_obj_set_style_radius(swatch, 0, 0);
     lv_obj_set_style_bg_color(swatch, lv_color_make(opt->r, opt->g, opt->b), 0);
     lv_obj_set_style_bg_opa(swatch, LV_OPA_COVER, 0);
     if (opt->has_gradient) {
@@ -116,6 +128,15 @@ void background_screen_show(lv_obj_t *parent_scr)
     lv_obj_set_size(s_list, LCD_H_RES - 40, LCD_V_RES - 100);
     lv_obj_align(s_list, LV_ALIGN_BOTTOM_MID, 0, -14);
     lv_obj_set_scroll_dir(s_list, LV_DIR_VER);
+    // full_refresh means every scroll-drag frame forces a complete 800x480
+    // SW re-render (see CLAUDE.md's RGB panel timing notes — same class of
+    // bus-bandwidth pressure that made the on-screen keyboard glitch under
+    // load). Momentum/elastic scrolling keeps generating those frames for
+    // a while *after* the finger lifts; killing both means redraws stop
+    // the instant the drag stops, cutting the total frame count per
+    // gesture instead of just each frame's cost.
+    lv_obj_clear_flag(s_list, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLL_MOMENTUM | LV_OBJ_FLAG_SCROLL_ELASTIC));
+    lv_obj_set_scrollbar_mode(s_list, LV_SCROLLBAR_MODE_OFF);  // one less (rounded, translucent) object redrawn every scroll frame
     lv_obj_set_layout(s_list, LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(s_list, LV_FLEX_FLOW_COLUMN);
 
