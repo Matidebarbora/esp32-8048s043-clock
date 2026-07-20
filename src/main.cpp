@@ -138,7 +138,7 @@ static lv_obj_t *make_temp_col(lv_obj_t *parent, const char *caption)
 #define TIME_DIGIT_HEIGHT 70
 #define HEADER_ROW_H       (TIME_DIGIT_HEIGHT + 2 * 16)              // 102
 #define HEADER_ROW_Y        (LCD_V_RES / 2 - 119 - HEADER_ROW_H / 2) // matches the old CENTER/-119 vertical position
-#define HEADER_GAP         12                                        // gap between header cards, and down to the weather card
+#define HEADER_GAP         20                                        // gap between header cards, and down to the weather card
 #define TIME_CARD_W        470
 
 // ── Sun-path arc geometry ─────────────────────────────────────────────────
