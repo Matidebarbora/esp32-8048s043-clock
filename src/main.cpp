@@ -435,8 +435,11 @@ static void build_ui(lv_obj_t *scr)
 
     lv_obj_t *wifi_btn = lv_btn_create(scr);
     lv_obj_set_size(wifi_btn, 44, 44);
-    lv_obj_align(wifi_btn, LV_ALIGN_TOP_RIGHT, -10, 10);
-    lv_obj_set_style_bg_opa(wifi_btn, LV_OPA_30, 0);
+    lv_obj_align(wifi_btn, LV_ALIGN_TOP_RIGHT, -CARD_MARGIN, 10);  // right edge lines up with the stock card's right edge
+    lv_obj_set_style_bg_color(wifi_btn, lv_color_make(26, 26, 30), 0);  // matches the cards' surface color
+    lv_obj_set_style_bg_opa(wifi_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(wifi_btn, 1, 0);
+    lv_obj_set_style_border_color(wifi_btn, lv_color_make(46, 46, 52), 0);
     g_wifi_icon = lv_label_create(wifi_btn);
     lv_label_set_text(g_wifi_icon, LV_SYMBOL_WIFI);
     lv_obj_set_style_text_font(g_wifi_icon, &lv_font_montserrat_24, 0);
@@ -454,8 +457,11 @@ static void build_ui(lv_obj_t *scr)
 
     lv_obj_t *gear = lv_btn_create(scr);
     lv_obj_set_size(gear, 44, 44);
-    lv_obj_align(gear, LV_ALIGN_TOP_RIGHT, -64, 10);
-    lv_obj_set_style_bg_opa(gear, LV_OPA_30, 0);
+    lv_obj_align(gear, LV_ALIGN_TOP_RIGHT, -78, 10);
+    lv_obj_set_style_bg_color(gear, lv_color_make(26, 26, 30), 0);  // matches the cards' surface color
+    lv_obj_set_style_bg_opa(gear, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(gear, 1, 0);
+    lv_obj_set_style_border_color(gear, lv_color_make(46, 46, 52), 0);
     lv_obj_t *gear_icon = lv_label_create(gear);
     lv_label_set_text(gear_icon, LV_SYMBOL_SETTINGS);
     lv_obj_set_style_text_font(gear_icon, &lv_font_montserrat_24, 0);
@@ -464,8 +470,11 @@ static void build_ui(lv_obj_t *scr)
 
     lv_obj_t *bulb_btn = lv_btn_create(scr);
     lv_obj_set_size(bulb_btn, 44, 44);
-    lv_obj_align(bulb_btn, LV_ALIGN_TOP_RIGHT, -118, 10);
-    lv_obj_set_style_bg_opa(bulb_btn, LV_OPA_30, 0);
+    lv_obj_align(bulb_btn, LV_ALIGN_TOP_RIGHT, -132, 10);
+    lv_obj_set_style_bg_color(bulb_btn, lv_color_make(26, 26, 30), 0);  // matches the cards' surface color
+    lv_obj_set_style_bg_opa(bulb_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(bulb_btn, 1, 0);
+    lv_obj_set_style_border_color(bulb_btn, lv_color_make(46, 46, 52), 0);
     g_bulb_icon = lv_img_create(bulb_btn);
     lv_img_set_src(g_bulb_icon, &img_bulb);
     lv_obj_center(g_bulb_icon);
