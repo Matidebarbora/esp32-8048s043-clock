@@ -10,7 +10,10 @@
 
 static const char *TAG = "weather";
 
-#define HTTP_BUF_SIZE 4096
+// Response now includes an hourly block (plus each block's *_units object,
+// which Open-Meteo returns by default) on top of the original current+daily
+// payload — bumped up from 4096 to keep comfortable headroom.
+#define HTTP_BUF_SIZE 6144
 
 struct HttpCtx {
     char  *buf;
@@ -46,13 +49,19 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 
 esp_err_t weather_fetch(float latitude, float longitude, weather_data_t *out)
 {
-    char url[256];
+    char url[384];
+    // forecast_hours counts from the current (already-started) hour, so ask
+    // for one extra and drop it below — the strip should show
+    // WEATHER_HOURLY_COUNT hours strictly ahead of now, not "now" itself.
     snprintf(url, sizeof(url),
              "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f"
              "&current=temperature_2m,weather_code"
+             "&hourly=temperature_2m,weather_code,precipitation_probability"
              "&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code,sunrise,sunset"
-             "&timezone=auto&forecast_days=%d",
-             latitude, longitude, WEATHER_FORECAST_DAYS);
+             "&timezone=auto&forecast_days=%d&forecast_hours=%d",
+             latitude, longitude, WEATHER_FORECAST_DAYS, WEATHER_HOURLY_COUNT + 1);
+
+    out->hourly_count = 0;
 
     char *buf = (char *)malloc(HTTP_BUF_SIZE);
     if (!buf) return ESP_ERR_NO_MEM;
@@ -134,6 +143,40 @@ esp_err_t weather_fetch(float latitude, float longitude, weather_data_t *out)
             }
         } else {
             ESP_LOGW(TAG, "Unexpected JSON shape");
+        }
+    }
+
+    // Best-effort: an hourly-forecast miss doesn't fail the whole fetch, it
+    // just leaves hourly_count at 0 (the header simply shows nothing there).
+    cJSON *hourly = cJSON_GetObjectItem(root, "hourly");
+    if (hourly) {
+        cJSON *h_time   = cJSON_GetObjectItem(hourly, "time");
+        cJSON *h_temp   = cJSON_GetObjectItem(hourly, "temperature_2m");
+        cJSON *h_code   = cJSON_GetObjectItem(hourly, "weather_code");
+        cJSON *h_precip = cJSON_GetObjectItem(hourly, "precipitation_probability");
+
+        if (cJSON_IsArray(h_time) && cJSON_IsArray(h_temp)) {
+            int hn = cJSON_GetArraySize(h_time);
+            if (hn > WEATHER_HOURLY_COUNT + 1) hn = WEATHER_HOURLY_COUNT + 1;
+
+            // Start at index 1 — index 0 is the current, already-started hour.
+            for (int i = 1; i < hn; i++) {
+                cJSON *t    = cJSON_GetArrayItem(h_time, i);
+                cJSON *temp = cJSON_GetArrayItem(h_temp, i);
+                if (!cJSON_IsString(t) || !cJSON_IsNumber(temp)) continue;
+
+                weather_hourly_t *h = &out->hourly[out->hourly_count];
+                extract_hhmm(h_time, i, h->time, sizeof(h->time));
+                h->temp_c = (float)temp->valuedouble;
+
+                cJSON *code = h_code ? cJSON_GetArrayItem(h_code, i) : nullptr;
+                h->weather_code = cJSON_IsNumber(code) ? code->valueint : -1;
+
+                cJSON *precip = h_precip ? cJSON_GetArrayItem(h_precip, i) : nullptr;
+                h->precip_prob = cJSON_IsNumber(precip) ? precip->valueint : -1;
+
+                out->hourly_count++;
+            }
         }
     }
 

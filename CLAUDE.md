@@ -42,17 +42,12 @@ Time zone (winter/summer DST) is **not** in `config.h` — it's chosen at runtim
 | `app_settings.cpp` | NVS-backed app settings — currently just DST mode (winter/summer), sets the POSIX `TZ` env var |
 | `settings_screen.cpp` | Settings menu (gear icon) — list of sub-screens |
 | `season_time_screen.cpp` | Settings sub-screen: winter/summer DST toggle |
-| `notification_filter_settings.cpp` / `notification_filter_screen.cpp` | NVS-backed per-app notification toggles (currently just "hide WhatsApp") + its Settings sub-screen (one switch row per app) — same NVS-settings/UI-screen split as `app_settings`/`season_time_screen` and `dimmer_settings`/`dimmer_screen` |
 | `dimmer_settings.cpp` / `dimmer_screen.cpp` | NVS-backed backlight dimmer (OFF/ON/AUTO with scheduled start/end times) + its settings sub-screen |
+| `background_settings.cpp` / `background_screen.cpp` | NVS-backed screen background choice (`BACKGROUND_OPTIONS[]` — solid colors and top-to-bottom gradients, index 0 always black) + its settings sub-screen (scrollable list of swatches). Unlike the other `_settings` modules, `background_settings_init()` must run *before* `build_ui()` — see "Startup sequence" below |
 | `weather.cpp` / `weather_icon.cpp` / `weather_icons_data.c` | Open-Meteo fetch/parse + cache, WMO-code-to-icon classification, Twemoji-derived icon bitmaps (sun/moon/cloud/rain/snow/storm, 100px + 32px) |
 | `geolocation.cpp` | One-time IP-based geolocation (ip-api.com) for the weather card's coordinates |
 | `forecast_screen.cpp` | 5-day forecast screen (tap the weather card) |
-| `time_digits_data.c` / `bulb_icon_data.c` / `app_icons_data.c` | Generated image assets — big clock digits, brightness bulb icon, WhatsApp/Gmail notification icons (see "Custom fonts" below for the generation pipeline pattern; icons follow the same offline Python approach) |
-| `ancs_client.cpp` | BLE stack init + pairing/bonding with the iPhone + ANCS (Apple Notification Center Service) GATT client — see "Bluetooth / ANCS notifications" below |
-| `notification_store.cpp` | Thread-safe in-memory notification history (ANCS callback thread writes, LVGL thread reads), avatar color/initials helpers |
-| `notification_icon.cpp` | Builds a notification avatar: real brand icon (WhatsApp/Gmail) or colored-circle-with-initials fallback |
-| `notification_screen.cpp` | Full notification history screen (tap the notification card), "remove all" |
-| `es_fonts.h` / `lv_font_montserrat_{16,20}_es.c` | Spanish-accented-character font variants — see "Custom fonts" below |
+| `time_digits_data.c` / `bulb_icon_data.c` | Generated image assets — big clock digits, brightness bulb icon |
 | `stocks.cpp` / `stocks_store.cpp` / `stocks_screen.cpp` | Yahoo Finance search/quote fetch (no API key — unofficial endpoints), NVS-backed pinned-symbol list (max 3), and the Settings sub-screen to search/pin/unpin — see "Stock tracking" below |
 | `sd_card.cpp` | Mounts the microSD card (FATFS over SPI) at boot for the photo slideshow — see "Photo slideshow" below |
 | `photo_slideshow_screen.cpp` | Full-screen photo slideshow (tap the time card) reading pre-converted images off the SD card, current time overlaid top-right, tap anywhere to exit |
@@ -62,18 +57,18 @@ Time zone (winter/summer DST) is **not** in `config.h` — it's chosen at runtim
 
 ### Threading model
 
-`LCDInit()` spawns an LVGL task pinned to **core 1** that calls `lv_tick_inc(20)` then `lv_task_handler()` every 20 ms.  `app_main` runs on **core 0**.  Any LVGL call from `app_main` must be wrapped with `lvgl_acquire()` / `lvgl_release()`, which take/give a mutex (`xGuiSemaphore`) checked by task-handle identity so the LVGL task can call LVGL without deadlock. The same rule applies to every other task that touches the UI: `weather_task`, `wifi_reconnect_task`, `dimmer_task`, and the ANCS BLE callback (via `notification_store`'s changed-callback, see below).
+`LCDInit()` spawns an LVGL task pinned to **core 1** that calls `lv_tick_inc(20)` then `lv_task_handler()` every 20 ms.  `app_main` runs on **core 0**.  Any LVGL call from `app_main` must be wrapped with `lvgl_acquire()` / `lvgl_release()`, which take/give a mutex (`xGuiSemaphore`) checked by task-handle identity so the LVGL task can call LVGL without deadlock. The same rule applies to every other task that touches the UI: `weather_task`, `wifi_reconnect_task`, `dimmer_task`.
 
 ### Startup sequence
 
 `app_main` runs strictly sequentially:
-1. `nvs_flash_init()` (with erase-and-retry on version mismatch) — must run before `ancs_client_init()`, since Bluedroid needs NVS up front to persist BLE bonding data (otherwise the iPhone has to be re-paired every reboot). Safe to call again later — `wifi_store`/`app_settings`/`dimmer_settings` each call it too; it's idempotent.
+1. `nvs_flash_init()` (with erase-and-retry on version mismatch). Safe to call again later — `wifi_store`/`app_settings`/`dimmer_settings`/`background_settings` each call it too; it's idempotent.
 2. `LCDInit()` — RGB panel + GT911 touch (direct I²C) + LVGL init + LVGL task; backlight on
-3. `ancs_client_init()` — BLE advertising + ANCS client starts in the background (pairing happens whenever the phone connects, independent of the rest of boot)
+3. `background_settings_init()` + change-callback — must happen before `build_ui()`, unlike every other `_settings` module below, since `build_ui()` reads it once to paint the screen's initial background
 4. `build_ui()` + `clock_tick_cb` (1 s) + `wifi_status_tick_cb` (2 s) timers
 5. `app_settings_init()` — loads DST mode, sets `TZ` (must happen before any time read)
 6. `wifi_store_init()` + `build_connect_candidates()`, `wifi_time_init()` (creates the connect mutex — must happen before any task that might call `wifi_connect_any()`/`wifi_connect_one()` is spawned)
-7. `dimmer_settings_init()` + change-callback, `notification_store` change-callback
+7. `dimmer_settings_init()` + change-callback
 8. Spawn `weather_task`, `wifi_reconnect_task`, `dimmer_task`
 9. `wifi_connect_any()` (10 s budget) → on success, `time_sync()` (SNTP). On WiFi/NTP failure, time and date are simply left blank — no manual entry fallback; `clock_tick_cb()` no-ops while the system clock is unset (`tm_year <= 70`)
 10. `vTaskSuspend(NULL)` — everything from here on is timer/task driven, `app_main` is no longer needed
@@ -84,11 +79,11 @@ LVGL is configured via Kconfig (`sdkconfig.defaults`) — `CONFIG_LV_CONF_SKIP=y
 
 `lv_tick_inc(20)` **must** be called every LVGL task iteration — without it, LVGL timers and the indev poll never fire (display freezes, touch never reported).
 
-Fonts currently enabled: Montserrat 14, 16, 20, 24, 28, 32, 48 — plus two custom Spanish-accented variants, see "Custom fonts" below.
+Fonts currently enabled: Montserrat 14, 16, 20, 24, 28, 32, 48.
 
-**Editing `sdkconfig.defaults` alone is not enough.** The persisted `sdkconfig.esp32s3-clock` file does **not** auto-regenerate new options from `sdkconfig.defaults` once it already exists — it only fills in options that weren't set before. After adding/changing anything in `sdkconfig.defaults`, delete **both** `.pio/build` **and** `sdkconfig.esp32s3-clock`, then rebuild. This has bitten every Kconfig change in this project (fonts, then Bluetooth, then the SPIRAM/mbedtls memory options) — check for it first whenever a new `CONFIG_*` setting doesn't seem to take effect.
+**Editing `sdkconfig.defaults` alone is not enough.** The persisted `sdkconfig.esp32s3-clock` file does **not** auto-regenerate new options from `sdkconfig.defaults` once it already exists — it only fills in options that weren't set before. After adding/changing anything in `sdkconfig.defaults`, delete **both** `.pio/build` **and** `sdkconfig.esp32s3-clock`, then rebuild. This has bitten every Kconfig change in this project (fonts, then the SPIRAM/mbedtls memory options) — check for it first whenever a new `CONFIG_*` setting doesn't seem to take effect.
 
-**LVGL's own memory pool (`CONFIG_LV_MEM_SIZE_KILOBYTES`) is separate from the general heap/PSRAM** — every `lv_obj_t`, style, and internal render buffer comes out of this one pool, allocated once at `lv_init()`. The 32 KB default was fine for a simple clock face, but this UI grew enough (stocks screen, notification/stock cards, photo slideshow, the 5-day forecast screen's ~50 objects built at once) to start hitting `lv_mem_realloc: couldn't allocate memory` / `Out of memory, can't allocate a new buffer` opening the forecast screen.
+**LVGL's own memory pool (`CONFIG_LV_MEM_SIZE_KILOBYTES`) is separate from the general heap/PSRAM** — every `lv_obj_t`, style, and internal render buffer comes out of this one pool, allocated once at `lv_init()`. The 32 KB default was fine for a simple clock face, but this UI grew enough (stocks screen, stock card, photo slideshow, the 5-day forecast screen's ~50 objects built at once) to start hitting `lv_mem_realloc: couldn't allocate memory` / `Out of memory, can't allocate a new buffer` opening the forecast screen.
 
 - **Raising `CONFIG_LV_MEM_SIZE_KILOBYTES` to its Kconfig-enforced ceiling (128) bricked the board on boot** — `esp_lcd_new_rgb_panel()` failed with `ESP_ERR_NO_MEM` (`no mem for bounce buffer`), because by default this pool is a *static array* that lands in internal RAM, and 128 KB of it left too little contiguous internal RAM for the RGB panel's own bounce buffer. Screen never lights, boot-loops forever. If this happens, the fix is a re-flash with a corrected build — the board isn't actually bricked, just running a bad image.
 - **The real fix**: keep `LV_MEM_SIZE_KILOBYTES=128` (still capped at 128 by Kconfig's `range 2 128`, and still not enough on its own) but source the pool's backing memory from PSRAM instead of that static array, via `LV_MEM_POOL_ALLOC` — a function-like macro LVGL's `lv_mem_init()` calls once to get the pool, *not* expressible through Kconfig (it needs a real macro, not a string), so it's set in **`platformio.ini`'s `build_flags`** instead: `-DLV_MEM_POOL_INCLUDE=\"esp_heap_caps.h\"` + `-DLV_MEM_POOL_ALLOC(size)=heap_caps_malloc(size,MALLOC_CAP_SPIRAM)`. This keeps LVGL's fast internal TLSF allocator for every small object (unlike `CONFIG_LV_MEM_CUSTOM`, which would route every allocation through the slower, more fragmentation-prone general heap) while pulling the one big backing block from PSRAM. Net effect: static RAM usage actually *dropped* below its pre-128KB baseline (the pool moved from a compile-time array to a runtime PSRAM allocation), with 4x the pool space LVGL has to work with.
@@ -100,7 +95,6 @@ Fonts currently enabled: Montserrat 14, 16, 20, 24, 28, 32, 48 — plus two cust
 | Component | Version | Purpose |
 |---|---|---|
 | `lvgl/lvgl` | 8.3.11 | UI framework |
-| `bt` (ESP-IDF built-in, Bluedroid host) | — | BLE advertising, pairing/bonding, GATT client — see "Bluetooth / ANCS notifications" |
 
 `espressif/esp_lcd_touch_gt911` was removed — GT911 is driven with direct I²C in `lcd.cpp`.
 
@@ -124,26 +118,6 @@ All GPIO assignments are in `src/lcd.h`. Key ones:
 - Pixel clock: GPIO 42 — **14 MHz** (18 MHz only survives *static* screens, see note below)
 - Touch I²C: SDA=19, SCL=20, INT=18, RST=38
 
-### Bluetooth / ANCS notifications (ancs_client.cpp)
-
-The board advertises as a connectable BLE peripheral ("ESP32-Clock"). The iPhone connects to it (via Settings > Bluetooth, or any BLE central app — **not** discoverable through Settings' "Other Devices" list, that only surfaces a narrow set of recognized accessory categories, so use a scanner app like nRF Connect/LightBlue to confirm advertising works). Once bonded, `ancs_client.cpp` acts as a GATT **client** against Apple's ANCS service (UUID `7905F431-...`) to receive live notification metadata (app, title, message, category) — see the ANCS spec for the wire format (8-byte Notification Source summary + Control Point `GetNotificationAttributes` request + Data Source response, which can arrive split across several BLE notifications and needs reassembly).
-
-Hard-won lessons, in the order they'd bite again:
-
-- **Pairing must be requested by the accessory, not just accepted.** The ESP32 only had a handler for *incoming* security requests; nothing ever asked the iPhone to pair, so no prompt ever appeared even when a central connected. Fix: call `esp_ble_set_encryption(remote_bda, ESP_BLE_SEC_ENCRYPT_NO_MITM)` right after the physical link forms (`ESP_GATTS_CONNECT_EVT`), which is what triggers the native "Bluetooth Pairing Request" popup on the phone regardless of which app initiated the connection.
-- **`esp_ble_gattc_open(..., is_direct=false)` does not mean "attach to the existing link."** It means "background auto-connect" (a whitelist-based reconnect mechanism) — a different feature entirely, and calling it that way fails immediately with "Unsupported transport." To act as a GATT client over a link the *phone* initiated (we're the peripheral), register a **GATTS** app purely to catch `ESP_GATTS_CONNECT_EVT` (no services need to be exposed) — its `conn_id` identifies the physical link and is directly usable in **GATTC** calls (`esp_ble_gattc_search_service` etc.) without ever calling `esp_ble_gattc_open()`. (An `esp_ble_gattc_open(..., is_direct=true)` also works — it just reuses the existing ACL link rather than erroring — but the GATTS-catch approach needs no extra attach step at all.)
-- **Only start GATT work after `ESP_GAP_BLE_AUTH_CMPL_EVT` succeeds**, not right after the physical connection — ANCS requires an encrypted, bonded link, and service discovery silently produces nothing (no error, no results, just no further events) if attempted too early.
-- **This target defaults to the BLE 5.0 extended-advertising API**, which is mutually exclusive with the legacy 4.2 `esp_ble_gap_start_advertising()`/`start_scanning()` calls this code uses — see `CONFIG_BT_BLE_50_FEATURES_SUPPORTED=n` / `CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y` in `sdkconfig.defaults`.
-- **BLE + WiFi + TLS together starve internal RAM** enough to fail `mbedtls_ssl_setup` mid-handshake once the BT stack is up (this project has 8 MB of PSRAM but mbedtls' default buffers and much of the BT stack default to internal SRAM). Fixed via `CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST=y` + `CONFIG_MBEDTLS_DYNAMIC_BUFFER=y` + a smaller `CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN` — see `sdkconfig.defaults`. That fix was only tested with one concurrent HTTPS client (`weather_task`); adding a second one (`stocks_task`/`stocks_screen.cpp`, hitting Yahoo Finance) reintroduced the exact same failure (`Dynamic Impl: alloc(...) failed` / `mbedtls_ssl_handshake returned -0x7F00`) even though 8 MB of PSRAM sat idle — mbedtls's dynamic SSL buffers are a few KB each, under `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL`'s default 16 KB threshold, so ESP-IDF's `malloc()` forced them into internal RAM no matter how much PSRAM was free. Fixed by lowering `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL` to `1024` so mid-size allocations like these can spill into PSRAM instead of fighting Wi-Fi/BT for the same scarce internal SRAM. If a third concurrent network client gets added later and this resurfaces, suspect this threshold (or genuine internal-RAM exhaustion from a growing BT/Wi-Fi footprint) before re-tuning the mbedtls buffer sizes again.
-  With that fixed, a *different* failure showed up against Yahoo Finance specifically (`mbedtls_ssl_handshake returned -0x7100` / `MBEDTLS_ERR_SSL_BAD_INPUT_DATA`, not an alloc failure) — `CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=4096` was sized for Open-Meteo's handshake messages, and Yahoo's CDN-fronted TLS termination sends a bigger certificate chain that didn't fit. Bumped back up to `8192` (still dynamically freed after use, and — being over the 1024-byte threshold above — still served from PSRAM, not internal RAM). If a future HTTPS endpoint fails the same way, suspect this content-length ceiling before assuming it's another RAM-starvation issue.
-  A fourth spot turned up once the SD card (`sd_card.cpp`) joined the mix: `esp-aes: Failed to allocate memory` / `mbedtls_ssl_handshake returned -0x0001`, from hardware AES acceleration's DMA path (`port/aes/dma/esp_aes_dma_core.c`) — genuinely needs DMA-capable (internal) memory, unrelated to the mbedtls buffer allocator below. Fixed by setting `CONFIG_MBEDTLS_HARDWARE_AES=n` — software AES sidesteps the DMA requirement entirely, and at this app's request volume (small payloads, infrequent) the CPU cost is not noticeable.
-  **Correction to everything above**: `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL` never actually applied to any of the mbedtls "Dynamic Impl" alloc failures — that's why they kept resurfacing under progressively less load despite three rounds of tuning it. The real mechanism: `mbedtls_calloc()` (used for the SSL session/transform/handshake state, not just the dynamic TX/RX buffers) maps to `esp_mbedtls_mem_calloc()` in ESP-IDF's `port/esp_mem.c`, and with the *default* `CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC=y`, that function calls `heap_caps_calloc(..., MALLOC_CAP_INTERNAL)` — an explicit, unconditional demand for internal RAM that a generic-malloc placement threshold has zero power over. The actual fix is `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y`, which switches that same function to `MALLOC_CAP_SPIRAM` instead. **Lesson for next time a "not enough internal RAM" symptom shows up**: check *how* the failing allocation actually requests memory (`heap_caps_*` with an explicit capability vs. plain `malloc()`) before reaching for `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL` — that threshold only ever affects the latter.
-- **iOS never exposes the phone's own battery level (or anything else outside ANCS/AMS) to a non-MFi accessory over BLE.** Don't go looking for a battery-service workaround; there isn't one without MFi hardware.
-
-The header's Bluetooth indicator (icon + connected phone's name, next to the date, blue, hidden when disconnected — `main.cpp`'s `wifi_status_tick_cb`) reads `ancs_client_is_connected()` / `ancs_client_get_device_name()`. The name comes from a *second*, unrelated read alongside ANCS discovery: `maybe_start_ancs_discovery()` now searches **all** of the phone's services (no UUID filter, since the filtered call only ever found ANCS), and `ESP_GATTC_SEARCH_RES_EVT` tells ANCS and the standard GAP service (`0x1800`) apart by comparing the actual UUID bytes (not just length — a filtered search can get away with "any 128-bit result is ANCS", an unfiltered one can't). Once GAP turns up, its Device Name characteristic (`0x2A00`) is read directly — falls back to the literal string `"iPhone"` if that characteristic isn't found or the read fails, which is expected/fine, not every OS is guaranteed to expose it.
-
-Per-app filtering (`notification_filter_settings.cpp`/`.h`) is checked in `ancs_client.cpp` right where a notification's app name is known, before it reaches `notification_store` — filtered notifications never enter the store, so they don't show on the card, the history screen, or (if you add push-style alerts later) trigger anything else. Currently only WhatsApp has a toggle; add more `get/set` pairs plus a `strcmp` there and a row in `notification_filter_screen.cpp` to extend it.
-
 ### Weather (weather.cpp, geolocation.cpp)
 
 Open-Meteo (`api.open-meteo.com`) needs no API key but also has no built-in IP geolocation — coordinates come from a one-time `ip-api.com` lookup at boot (`geolocation.cpp`), falling back to `FALLBACK_LATITUDE`/`FALLBACK_LONGITUDE` in `config.h` if that fails. `weather_task` (in `main.cpp`) re-fetches every 15 minutes (30 s retry on failure) and caches the last successful result via `weather_set_last()`/`weather_get_last()` so `forecast_screen.cpp` can read it without a network round trip.
@@ -152,7 +126,7 @@ The sun-path arc on the main screen is a full 24h day/night loop, not just the d
 
 ### Stock tracking (stocks.cpp, stocks_store.cpp, stocks_screen.cpp)
 
-Same "no API key" philosophy as weather: uses Yahoo Finance's unofficial endpoints (`query1.finance.yahoo.com/v1/finance/search` for symbol/company search, `.../v8/finance/chart/{symbol}` for a single quote) with a browser `User-Agent` header, since Yahoo blocks obviously non-browser requests. `stocks_task` (in `main.cpp`) polls the up-to-3 pinned symbols every 60 s, or immediately after a pin/unpin (`stocks_store_set_changed_cb`), and rebuilds the header's stock card the same clean+rebuild-every-time way `update_notification_card()` does. See the "BLE + WiFi + TLS" hard-won lesson below (Bluetooth section) — adding this as a second concurrent HTTPS client is what surfaced the SPIRAM/mbedtls tuning documented there.
+Same "no API key" philosophy as weather: uses Yahoo Finance's unofficial endpoints (`query1.finance.yahoo.com/v1/finance/search` for symbol/company search, `.../v8/finance/chart/{symbol}` for a single quote) with a browser `User-Agent` header, since Yahoo blocks obviously non-browser requests. `stocks_task` (in `main.cpp`) polls the up-to-3 pinned symbols every 60 s, or immediately after a pin/unpin (`stocks_store_set_changed_cb`), and rebuilds the header's stock card via `update_stock_card()` (clean+rebuild every time). Running this as a second concurrent HTTPS client (alongside `weather_task`) is what surfaced the SPIRAM/mbedtls tuning in `sdkconfig.defaults` — see the comments there for the RAM-contention history.
 
 ### Photo slideshow (sd_card.cpp, photo_slideshow_screen.cpp, tools/convert_photos.py)
 
@@ -168,7 +142,7 @@ Tap the time card to open a full-screen slideshow of photos read off the microSD
 
 `CONFIG_LV_USE_LOG` (+ `LV_LOG_LEVEL_WARN` + `LV_LOG_PRINTF`) is enabled in `sdkconfig.defaults` specifically because of how long the above took to find with LVGL logging off — it's cheap (silent on the happy path) and worth keeping on for any future work that touches image/file loading.
 
-If a future photo needs a different color/behavior and this binary format needs revisiting, the authoritative reference is `lv_img_header_t` in `managed_components/lvgl__lvgl/src/draw/lv_img_buf.h` and `lv_color16_t` in `.../src/misc/lv_color.h` — both were used to derive the exact byte layout in `convert_photos.py`, and validated once by hand (decoding a converted file's header + sample pixels back in Python and checking against the source image) the same way the custom fonts' pipeline validates against the stock font file — don't skip that check when regenerating this format.
+If a future photo needs a different color/behavior and this binary format needs revisiting, the authoritative reference is `lv_img_header_t` in `managed_components/lvgl__lvgl/src/draw/lv_img_buf.h` and `lv_color16_t` in `.../src/misc/lv_color.h` — both were used to derive the exact byte layout in `convert_photos.py`, and validated once by hand (decoding a converted file's header + sample pixels back in Python and checking against the source image) — don't skip that check when regenerating this format.
 
 ## Critical hardware details — ESP32-8048S043
 
@@ -260,18 +234,3 @@ on any container that holds interactive widgets.
 **Prefer +/− buttons over `lv_roller` for number input.** Even with the scrollable-flag fix, rollers can be unreliable for precise input on this board. Simple LVGL buttons with click callbacks are robust and easy to tap.
 
 **`lv_timer_create` callbacks run inside `lv_task_handler()`** — no mutex needed. Callbacks invoked from other tasks (e.g., `app_main`) must use `lvgl_acquire()` / `lvgl_release()`.
-
-### Custom fonts (es_fonts.h / lv_font_montserrat_{16,20}_es.c)
-
-The stock `lv_font_montserrat_XX` fonts built into LVGL only cover ASCII (0x20-0x7E) plus a handful of icon glyphs (see the `Opts:` comment at the top of `managed_components/lvgl__lvgl/src/font/lv_font_montserrat_16.c` for the exact `lv_font_conv` invocation) — no accented Latin characters at all, so Spanish notification text silently dropped `á é í ó ú ü ñ ¿ ¡` etc. There's no Kconfig option that fixes this — the prebuilt `.c` files are static binaries baked at LVGL-release time.
-
-Fix: two custom fonts (`lv_font_montserrat_16_es`, `lv_font_montserrat_20_es`) covering ASCII + `¡¿ÁÉÍÑÓÚÜáéíñóúü`, generated without Node.js/`lv_font_conv` (not available in this environment) via a Python pipeline instead:
-
-1. `pip install freetype-py fonttools`
-2. Download the Montserrat **variable** font (Google Fonts moved off static per-weight files): `ofl/montserrat/Montserrat[wght].ttf` from `github.com/google/fonts`
-3. Instantiate the Medium (500) weight lv_font_conv actually uses: `python -m fontTools.varLib.instancer Montserrat[wght].ttf wght=500 -o Montserrat-Medium.ttf`
-4. Render each glyph with FreeType: `FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL | FT_LOAD_NO_HINTING` (hinting snaps metrics to whole pixels — `lv_font_conv` doesn't hint, so this is required to match). Trim rows where every pixel is below a small threshold (~32/255) from the top/bottom of the raw bitmap — FreeType's own AA leaves a near-invisible fringe row `lv_font_conv` doesn't.
-5. Pack glyphs into `lv_font_fmt_txt_dsc_t` / `lv_font_t` structs by hand (`LV_FONT_FMT_TXT_PLAIN`, 4bpp, no kerning — `kern_dsc = NULL`) — the struct layouts are in `lv_font_fmt_txt.h`. `line_height`/`base_line` are global per-size constants, not derived from glyphs — copy them straight from the matching stock font file rather than recomputing.
-6. **Validate before trusting it**: parse the known-good `glyph_dsc[]` values out of the stock `lv_font_montserrat_16.c` and compare against what the pipeline computes for the same ASCII glyphs. This caught the hinting and AA-fringe issues above — don't skip this step when regenerating.
-
-To add more characters later (another language, more punctuation), extend the accented-character list in the generator script and rerun — the pipeline is not currently checked into the repo (built in a scratch dir), so it needs to be reconstructed from this recipe.

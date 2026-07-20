@@ -23,13 +23,8 @@
 #include "time_digits_data.h"
 #include "bulb_icon_data.h"
 #include "dimmer_settings.h"
-#include "ancs_client.h"
+#include "background_settings.h"
 #include "nvs_flash.h"
-#include "notification_store.h"
-#include "notification_screen.h"
-#include "notification_icon.h"
-#include "es_fonts.h"
-#include "notification_filter_settings.h"
 #include "stocks.h"
 #include "stocks_store.h"
 #include "sd_card.h"
@@ -66,9 +61,9 @@ static void build_connect_candidates()
 }
 
 // ── UI state ──────────────────────────────────────────────────────────────────
+static lv_obj_t *g_clock_scr;  // the clock screen itself — needed by apply_background() to re-color it on change
 static lv_obj_t *g_time_digits[8];  // H H : M M : S S — rendered as images, see time_digits_data.h
 static lv_obj_t *g_date_label;
-static lv_obj_t *g_bt_label;  // header Bluetooth indicator — hidden until a phone connects
 static lv_obj_t *g_status_label;
 static lv_obj_t *g_wifi_icon;  // header Wi-Fi button icon — green when connected, red otherwise
 static lv_obj_t *g_temp_min_label;
@@ -82,12 +77,11 @@ static lv_obj_t *g_last_update_label;
 static lv_obj_t *g_sun_marker;
 static lv_obj_t *g_sunrise_label;
 static lv_obj_t *g_sunset_label;
-static lv_obj_t *g_notif_card;
+static lv_obj_t *g_hourly_row;
 static lv_obj_t *g_stock_card;
 
-#define NOTIF_CARD_ROWS 3
 #define STOCK_CARD_ROWS 3
-#define STOCK_ROW_HEIGHT 26  // matches NOTIF_CARD_ROW_HEIGHT — same row rhythm, different card
+#define STOCK_ROW_HEIGHT 26
 
 // Horizontal margin left/right of every card, so the dark background shows
 // as a frame around them.
@@ -136,6 +130,16 @@ static lv_obj_t *make_temp_col(lv_obj_t *parent, const char *caption)
     lv_obj_set_style_text_color(val, lv_color_white(), 0);
     return val;
 }
+
+// ── Time-card fixed geometry ─────────────────────────────────────────────
+// Shared between build_ui() (which lays out the card itself) and the
+// second-hand progress ring below, which needs the card's exact pixel size
+// to trace its border.
+#define TIME_DIGIT_HEIGHT 70
+#define HEADER_ROW_H       (TIME_DIGIT_HEIGHT + 2 * 16)              // 102
+#define HEADER_ROW_Y        (LCD_V_RES / 2 - 119 - HEADER_ROW_H / 2) // matches the old CENTER/-119 vertical position
+#define HEADER_GAP         12                                        // gap between header cards, and down to the weather card
+#define TIME_CARD_W        470
 
 // ── Sun-path arc geometry ─────────────────────────────────────────────────
 // Full circle: the sun/moon's complete 24h orbit around the planet. 0°/180°
@@ -251,90 +255,6 @@ static void on_time_card_click(lv_event_t *e)
     photo_slideshow_screen_show(clock_scr);
 }
 
-static void on_notification_card_click(lv_event_t *e)
-{
-    auto *clock_scr = (lv_obj_t *)lv_event_get_user_data(e);
-    notification_screen_show(clock_scr);
-}
-
-// One compact row inside the persistent notification card: small icon +
-// "AppName: title" on a single line, dot-truncated if too long.
-#define NOTIF_CARD_ROW_HEIGHT 26  // matches the row icon size — every row/placeholder is exactly this tall
-
-static void build_notif_card_row(lv_obj_t *parent, const notification_t *n)
-{
-    lv_obj_t *row = lv_obj_create(parent);
-    lv_obj_remove_style_all(row);
-    lv_obj_clear_flag(row, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
-    lv_obj_set_size(row, LV_SIZE_CONTENT, NOTIF_CARD_ROW_HEIGHT);
-    lv_obj_set_layout(row, LV_LAYOUT_FLEX);
-    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(row, 10, 0);
-
-    notification_icon_create(row, n->app_name, NOTIF_CARD_ROW_HEIGHT);
-
-    const char *body = n->title[0] ? n->title : n->message;
-    char buf[192];  // generous headroom (app_name[32] + message[128]) so -Werror=format-truncation stays quiet
-    snprintf(buf, sizeof(buf), "%s: %s", n->app_name, body);
-    lv_obj_t *lbl = lv_label_create(row);
-    lv_label_set_text(lbl, buf);
-    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16_es, 0);
-    lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
-    lv_obj_set_width(lbl, LCD_H_RES - 2 * CARD_MARGIN - 32 - NOTIF_CARD_ROW_HEIGHT - 10);  // card minus its own padding, icon, and gap
-    lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
-}
-
-// A row slot with no notification yet — same fixed height as a real row, so
-// the card's total height never changes as notifications arrive/clear.
-// text is only non-null for the very first slot when the store is empty.
-static void build_notif_card_empty_row(lv_obj_t *parent, const char *text)
-{
-    lv_obj_t *row = lv_obj_create(parent);
-    lv_obj_remove_style_all(row);
-    lv_obj_clear_flag(row, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
-    lv_obj_set_size(row, LV_SIZE_CONTENT, NOTIF_CARD_ROW_HEIGHT);
-    if (!text) return;
-
-    lv_obj_set_layout(row, LV_LAYOUT_FLEX);
-    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_t *lbl = lv_label_create(row);
-    lv_label_set_text(lbl, text);
-    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(lbl, lv_color_make(120, 120, 125), 0);
-}
-
-// Refreshes the persistent notification card from the store. Always renders
-// exactly NOTIF_CARD_ROWS row slots (real notifications first, then empty
-// placeholders) so the card's height never changes as notifications arrive
-// or get cleared — only the weather/status labels above it were designed to
-// tolerate the layout shifting under them, this card wasn't. Safe to call
-// from the LVGL task only — callers outside it must wrap with
-// lvgl_acquire()/lvgl_release() (see on_notification_store_changed()).
-static void update_notification_card()
-{
-    lv_obj_clean(g_notif_card);
-
-    notification_t items[NOTIF_CARD_ROWS];
-    size_t count = notification_store_get_all(items, NOTIF_CARD_ROWS);
-
-    for (size_t i = 0; i < NOTIF_CARD_ROWS; i++) {
-        if (i < count)
-            build_notif_card_row(g_notif_card, &items[i]);
-        else
-            build_notif_card_empty_row(g_notif_card, (count == 0 && i == 0) ? "No notifications yet" : nullptr);
-    }
-}
-
-// Called from the ANCS BLE task (via notification_store_set_changed_cb) —
-// not the LVGL task, so it must take the LVGL mutex itself.
-static void on_notification_store_changed()
-{
-    lvgl_acquire();
-    update_notification_card();
-    lvgl_release();
-}
-
 // One row in the stock card: up/down arrow (colored) + symbol + price, all
 // in white except the arrow. Neutral gray arrow and "--" price while a quote
 // hasn't been fetched yet (valid == false).
@@ -398,9 +318,10 @@ static void build_stock_card_empty_row(lv_obj_t *parent, const char *text)
 }
 
 // Rebuilds the stock card from quotes (up to STOCK_CARD_ROWS entries).
-// Always renders exactly STOCK_CARD_ROWS row slots, same fixed-height-card
-// rationale as update_notification_card(). Called from stocks_task (not the
-// LVGL task) — caller must wrap with lvgl_acquire()/lvgl_release().
+// Always renders exactly STOCK_CARD_ROWS row slots so the card's total
+// height never changes as stocks are pinned/unpinned. Called from
+// stocks_task (not the LVGL task) — caller must wrap with
+// lvgl_acquire()/lvgl_release().
 static void update_stock_card(const stock_quote_t *quotes, size_t count)
 {
     lv_obj_clean(g_stock_card);
@@ -413,9 +334,104 @@ static void update_stock_card(const stock_quote_t *quotes, size_t count)
     }
 }
 
+// One column in the hourly-forecast strip: "HH" over a small weather icon
+// over the temperature for that hour. is_night swaps in the moon variant of
+// the clear-sky icon, same as the Group-1 icon in update_sun_arc().
+static void build_hourly_item(lv_obj_t *parent, const weather_hourly_t *h, bool is_night)
+{
+    lv_obj_t *col = lv_obj_create(parent);
+    lv_obj_remove_style_all(col);
+    lv_obj_clear_flag(col, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
+    lv_obj_set_size(col, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_grow(col, 1);  // even spacing across the full card width
+    lv_obj_set_layout(col, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(col, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(col, 8, 0);
+
+    lv_obj_t *hour_lbl = lv_label_create(col);
+    lv_label_set_text(hour_lbl, h->time);  // "HH:MM"
+    lv_obj_set_style_text_font(hour_lbl, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(hour_lbl, lv_color_make(140, 140, 145), 0);
+
+    // Icon + temp side by side instead of stacked, to keep the strip's total
+    // height down.
+    lv_obj_t *icon_temp_row = lv_obj_create(col);
+    lv_obj_remove_style_all(icon_temp_row);
+    lv_obj_clear_flag(icon_temp_row, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
+    lv_obj_set_size(icon_temp_row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_layout(icon_temp_row, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(icon_temp_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(icon_temp_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(icon_temp_row, 12, 0);
+
+    weather_icon_create(icon_temp_row, h->weather_code, 32, is_night);
+
+    char temp_buf[8];
+    snprintf(temp_buf, sizeof(temp_buf), "%.0f\xc2\xb0", h->temp_c);
+    lv_obj_t *temp_lbl = lv_label_create(icon_temp_row);
+    lv_label_set_text(temp_lbl, temp_buf);
+    lv_obj_set_style_text_font(temp_lbl, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(temp_lbl, lv_color_white(), 0);
+}
+
+// Rebuilds the hourly-forecast strip (bottom of the weather card) from the
+// rolling forecast in wd->hourly. wd == nullptr (or an empty forecast) shows
+// a single placeholder row instead. Called from the LVGL task only —
+// callers outside it must wrap with lvgl_acquire()/lvgl_release() (same
+// convention as update_notification_card() used to follow).
+static void update_hourly_row(const weather_data_t *wd)
+{
+    lv_obj_clean(g_hourly_row);
+
+    if (!wd || wd->hourly_count == 0) {
+        lv_obj_t *lbl = lv_label_create(g_hourly_row);
+        lv_label_set_text(lbl, "No hourly forecast yet");
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_make(120, 120, 125), 0);
+        return;
+    }
+
+    int sunrise_min = hhmm_to_minutes(wd->sunrise);
+    int sunset_min  = hhmm_to_minutes(wd->sunset);
+
+    for (int i = 0; i < wd->hourly_count; i++) {
+        const weather_hourly_t *h = &wd->hourly[i];
+        int  hour_min  = hhmm_to_minutes(h->time);
+        bool is_night  = sunrise_min >= 0 && sunset_min >= 0 && hour_min >= 0 &&
+                          (hour_min < sunrise_min || hour_min >= sunset_min);
+        build_hourly_item(g_hourly_row, h, is_night);
+    }
+}
+
+// Applies the currently-selected background_settings option to the clock
+// screen. Called once from build_ui() (initial paint) and again from
+// on_background_changed() whenever the Background settings screen picks a
+// new option — both calls always happen on the LVGL task (the settings
+// screen's button click handler runs there too), so no lvgl_acquire() needed.
+static void apply_background()
+{
+    int idx = background_settings_get_index();
+    const background_option_t *opt = &BACKGROUND_OPTIONS[idx];
+
+    lv_obj_set_style_bg_color(g_clock_scr, lv_color_make(opt->r, opt->g, opt->b), 0);
+    if (opt->has_gradient) {
+        lv_obj_set_style_bg_grad_color(g_clock_scr, lv_color_make(opt->r2, opt->g2, opt->b2), 0);
+        lv_obj_set_style_bg_grad_dir(g_clock_scr, LV_GRAD_DIR_VER, 0);
+    } else {
+        lv_obj_set_style_bg_grad_dir(g_clock_scr, LV_GRAD_DIR_NONE, 0);
+    }
+}
+
+static void on_background_changed()
+{
+    apply_background();
+}
+
 static void build_ui(lv_obj_t *scr)
 {
-    lv_obj_set_style_bg_color(scr, lv_color_make(8, 8, 10), 0);
+    g_clock_scr = scr;
+    apply_background();
 
     lv_obj_t *wifi_btn = lv_btn_create(scr);
     lv_obj_set_size(wifi_btn, 44, 44);
@@ -428,30 +444,13 @@ static void build_ui(lv_obj_t *scr)
     lv_obj_center(g_wifi_icon);
     lv_obj_add_event_cb(wifi_btn, on_wifi_icon_click, LV_EVENT_CLICKED, scr);
 
-    // Sits where the Wi-Fi SSID label used to be, top-left of the header.
-    // Sized to its own content (not a fixed width) so the Bluetooth
-    // indicator below can sit right after it instead of floating in
-    // whatever space a fixed-width box left over.
+    // Top-left of the header.
     g_date_label = lv_label_create(scr);
     lv_obj_set_style_text_font(g_date_label, &lv_font_montserrat_24, 0);
     lv_obj_set_style_text_color(g_date_label, lv_color_make(170, 170, 175), 0);
     lv_obj_set_width(g_date_label, LV_SIZE_CONTENT);
     lv_obj_align(g_date_label, LV_ALIGN_TOP_LEFT, CARD_MARGIN, 16);  // left edge lines up with the cards below
     lv_label_set_text(g_date_label, "");
-
-    // Bluetooth indicator: icon + connected phone's name, all in blue,
-    // centered across the top of the screen. Hidden until ancs_client
-    // reports a phone connected (see wifi_status_tick_cb, which also polls
-    // this every 2s).
-    g_bt_label = lv_label_create(scr);
-    lv_obj_set_style_text_font(g_bt_label, &lv_font_montserrat_24, 0);
-    lv_obj_set_style_text_color(g_bt_label, lv_color_make(90, 160, 255), 0);
-    lv_obj_set_width(g_bt_label, 220);
-    lv_label_set_long_mode(g_bt_label, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_align(g_bt_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(g_bt_label, LV_ALIGN_TOP_MID, 0, 16);
-    lv_label_set_text(g_bt_label, "");
-    lv_obj_add_flag(g_bt_label, LV_OBJ_FLAG_HIDDEN);
 
     lv_obj_t *gear = lv_btn_create(scr);
     lv_obj_set_size(gear, 44, 44);
@@ -479,11 +478,10 @@ static void build_ui(lv_obj_t *scr)
     // the widest possible HH:MM:SS combination (six digits up to 60px each +
     // two 22px colons = 404px of images) plus the card's own horizontal
     // padding, with a little headroom.
-    const int time_digit_height = 70;
-    const int header_row_h      = time_digit_height + 2 * 16;                  // 102
-    const int header_row_y      = LCD_V_RES / 2 - 119 - header_row_h / 2;      // matches the old CENTER/-119 vertical position
-    const int header_gap        = 12;                                          // gap between header cards, and down to the weather card
-    const int time_card_w       = 470;
+    const int header_row_h = HEADER_ROW_H;
+    const int header_row_y = HEADER_ROW_Y;
+    const int header_gap   = HEADER_GAP;
+    const int time_card_w  = TIME_CARD_W;
 
     lv_obj_t *time_card = make_card(scr, LV_FLEX_FLOW_ROW);
     lv_obj_set_size(time_card, time_card_w, header_row_h);
@@ -512,8 +510,7 @@ static void build_ui(lv_obj_t *scr)
 
     // ── Stock card: fills the rest of the header row, right of the time card.
     // Up to STOCK_CARD_ROWS pinned symbols, one compact row each — rebuilt
-    // from scratch on every update (see update_stock_card()), same
-    // clean+rebuild pattern as the notification card below.
+    // from scratch on every update, see update_stock_card().
     g_stock_card = make_card(scr, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_size(g_stock_card, LCD_H_RES - 2 * CARD_MARGIN - time_card_w - header_gap, header_row_h);
     lv_obj_set_style_pad_hor(g_stock_card, 16, 0);
@@ -523,7 +520,8 @@ static void build_ui(lv_obj_t *scr)
     lv_obj_align_to(g_stock_card, time_card, LV_ALIGN_OUT_RIGHT_MID, header_gap, 0);
 
     // ── Weather card ─────────────────────────────────────────────────────────
-    // weather_card is a ROW: [left_spacer] [middle_col] [right_spacer].
+    // weather_card is a COLUMN: [top_row] [hourly_divider] [hourly_row].
+    //   top_row is the original ROW: [left_spacer] [middle_col] [right_spacer].
     //   left_spacer / right_spacer both use flex-grow:1, so LVGL always makes
     //   them exactly the same width (whatever's left over once middle_col
     //   takes its content width) — that keeps Group 2 truly centered on the
@@ -532,11 +530,13 @@ static void build_ui(lv_obj_t *scr)
     //   Group 1 (in left_spacer): icon alone
     //   Group 2 (middle_col): description/rain% over [MIN|NOW|MAX] / [City - Last update: HH:MM]
     //   Group 3 (in right_spacer): dashed arc from sunrise to sunset with a moving sun
-    lv_obj_t *weather_card = make_card(scr, LV_FLEX_FLOW_ROW);
+    //   hourly_row: today's rolling hourly forecast, filling the space the
+    //   notification card used to occupy — see update_hourly_row().
+    lv_obj_t *weather_card = make_card(scr, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_hor(weather_card, 16, 0);
     lv_obj_set_style_pad_top(weather_card, 6, 0);
-    lv_obj_set_style_pad_bottom(weather_card, 10, 0);
-    lv_obj_set_style_pad_column(weather_card, 24, 0);  // gap between the 3 top-level groups
+    lv_obj_set_style_pad_bottom(weather_card, 18, 0);
+    lv_obj_set_style_pad_row(weather_card, 18, 0);  // gap between top_row and the hourly strip
     // Anchored to the header row's fixed geometry (not time_card, which no
     // longer spans the full width) so it stays centered under both header cards.
     lv_obj_align(weather_card, LV_ALIGN_TOP_MID, 0, header_row_y + header_row_h + header_gap);
@@ -550,8 +550,17 @@ static void build_ui(lv_obj_t *scr)
     // clickable object under the finger and the tap never bubbles up to
     // weather_card's own click handler.
 
+    lv_obj_t *top_row = lv_obj_create(weather_card);
+    lv_obj_remove_style_all(top_row);
+    lv_obj_clear_flag(top_row, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
+    lv_obj_set_size(top_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_layout(top_row, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(top_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(top_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(top_row, 24, 0);  // gap between the 3 top-level groups
+
     // ── Group 1: icon alone, centered in the left leftover space ────────────
-    lv_obj_t *left_spacer = lv_obj_create(weather_card);
+    lv_obj_t *left_spacer = lv_obj_create(top_row);
     lv_obj_remove_style_all(left_spacer);
     lv_obj_clear_flag(left_spacer, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
     lv_obj_set_size(left_spacer, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
@@ -566,7 +575,7 @@ static void build_ui(lv_obj_t *scr)
     lv_obj_set_size(g_weather_icon_slot, 100, 100);
 
     // ── Group 2: description/rain over temps, centered on the card ──────────
-    lv_obj_t *middle_col = lv_obj_create(weather_card);
+    lv_obj_t *middle_col = lv_obj_create(top_row);
     lv_obj_remove_style_all(middle_col);
     lv_obj_clear_flag(middle_col, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
     lv_obj_set_size(middle_col, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
@@ -670,10 +679,10 @@ static void build_ui(lv_obj_t *scr)
     lv_label_set_text(g_last_update_label, "");
 
     // ── Group 3: sun-path arc, centered in the right leftover space ─────────
-    // right_spacer's only child is the circle itself now, so weather_card's
-    // own cross-axis centering lands exactly on the circle — no extra
-    // content below it to throw the centering off.
-    lv_obj_t *right_spacer = lv_obj_create(weather_card);
+    // right_spacer's only child is the circle itself now, so top_row's own
+    // cross-axis centering lands exactly on the circle — no extra content
+    // below it to throw the centering off.
+    lv_obj_t *right_spacer = lv_obj_create(top_row);
     lv_obj_remove_style_all(right_spacer);
     lv_obj_clear_flag(right_spacer, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
     lv_obj_set_size(right_spacer, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
@@ -725,18 +734,24 @@ static void build_ui(lv_obj_t *scr)
     lv_label_set_text(g_sunset_label, "--:--");
     lv_obj_align(g_sunset_label, LV_ALIGN_RIGHT_MID, 0, 0);
 
-    // ── Notification card ────────────────────────────────────────────────────
-    // Up to the 3 most recent ANCS notifications, one compact row each —
-    // rebuilt from scratch on every update (see update_notification_card()),
-    // same clean+rebuild pattern as the weather icon slot above.
-    g_notif_card = make_card(scr, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_hor(g_notif_card, 16, 0);
-    lv_obj_set_style_pad_ver(g_notif_card, 6, 0);
-    lv_obj_set_style_pad_row(g_notif_card, 4, 0);
-    lv_obj_set_flex_align(g_notif_card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
-    lv_obj_align_to(g_notif_card, weather_card, LV_ALIGN_OUT_BOTTOM_MID, 0, 10);
-    lv_obj_set_style_bg_color(g_notif_card, lv_color_make(36, 36, 42), LV_STATE_PRESSED);
-    lv_obj_add_event_cb(g_notif_card, on_notification_card_click, LV_EVENT_CLICKED, scr);
+    // ── Hourly forecast strip: fills the space the old notification card
+    // used to occupy, below a thin divider line ─────────────────────────────
+    lv_obj_t *hourly_divider = lv_obj_create(weather_card);
+    lv_obj_remove_style_all(hourly_divider);
+    lv_obj_clear_flag(hourly_divider, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
+    lv_obj_set_size(hourly_divider, LV_PCT(100), 1);
+    lv_obj_set_style_bg_color(hourly_divider, lv_color_make(46, 46, 52), 0);
+    lv_obj_set_style_bg_opa(hourly_divider, LV_OPA_COVER, 0);
+
+    g_hourly_row = lv_obj_create(weather_card);
+    lv_obj_remove_style_all(g_hourly_row);
+    lv_obj_clear_flag(g_hourly_row, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
+    lv_obj_set_size(g_hourly_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_top(g_hourly_row, 2, 0);  // breathing room below the divider
+    lv_obj_set_style_pad_column(g_hourly_row, 16, 0);  // gap between hour columns
+    lv_obj_set_layout(g_hourly_row, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(g_hourly_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(g_hourly_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
     g_status_label = lv_label_create(scr);
     lv_obj_set_style_text_font(g_status_label, &lv_font_montserrat_16, 0);
@@ -744,8 +759,8 @@ static void build_ui(lv_obj_t *scr)
     lv_obj_align(g_status_label, LV_ALIGN_BOTTOM_MID, 0, -12);
     lv_label_set_text(g_status_label, "");
 
-    update_notification_card();     // initial empty state
     update_stock_card(nullptr, 0);  // initial empty state
+    update_hourly_row(nullptr);     // initial empty state
 }
 
 // Tracks the last (weather_code, is_night) pair the Group-1 icon was built
@@ -844,21 +859,12 @@ static void wifi_cb(const char *ssid, size_t index, size_t total)
 // regardless of whether the connection came from startup or the settings
 // screen. Runs inside lv_task_handler — no mutex needed. Which network it's
 // connected to is shown inside the Wi-Fi settings screen, not the header.
-// Also polls the BLE/ANCS connection state for the Bluetooth indicator next
-// to the date — same cheap "just re-set it every tick" approach.
 static void wifi_status_tick_cb(lv_timer_t *)
 {
     char ssid[33];
     bool connected = wifi_get_connected_ssid(ssid, sizeof(ssid));
     lv_obj_set_style_text_color(g_wifi_icon,
         connected ? lv_color_make(60, 200, 100) : lv_color_make(150, 70, 70), 0);
-
-    if (ancs_client_is_connected()) {
-        lv_label_set_text_fmt(g_bt_label, LV_SYMBOL_BLUETOOTH "  %s", ancs_client_get_device_name());
-        lv_obj_clear_flag(g_bt_label, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        lv_obj_add_flag(g_bt_label, LV_OBJ_FLAG_HIDDEN);
-    }
 }
 
 // If the Wi-Fi connection is ever down (failed at boot, or dropped later),
@@ -1002,6 +1008,7 @@ static void weather_task(void *)
             lv_label_set_text(g_weather_desc_label, desc);
             lv_label_set_text(g_rain_label, rain_buf);
             lv_label_set_text(g_last_update_label, update_buf);
+            update_hourly_row(&wd);
             weather_set_last(&wd);  // cache for forecast_screen.cpp — see weather.h
             lvgl_release();
             ESP_LOGI(TAG, "Weather: min=%.1f now=%.1f max=%.1f (%s, %s rain)",
@@ -1061,10 +1068,8 @@ static void stocks_task(void *)
 
 extern "C" void app_main(void)
 {
-    // Must run before ancs_client_init() — Bluedroid needs NVS up front to
-    // persist BLE bonding data, otherwise the iPhone has to be re-paired on
-    // every reboot. Safe to call again later (wifi_store/app_settings/etc.
-    // all do); nvs_flash_init() is idempotent.
+    // Safe to call again later (wifi_store/app_settings/etc. all do);
+    // nvs_flash_init() is idempotent.
     esp_err_t nvs_ret = nvs_flash_init();
     if (nvs_ret == ESP_ERR_NVS_NO_FREE_PAGES || nvs_ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -1075,16 +1080,15 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(LCDInit());
     lcd_set_backlight(100);  // matches g_brightness_full's initial value
 
-    // Independent of Wi-Fi/BLE — just mounts the microSD card (if any) for
+    // Independent of Wi-Fi — just mounts the microSD card (if any) for
     // photo_slideshow_screen.cpp. Doesn't block boot if no card is present.
     sd_card_init();
 
-    // Must happen before ancs_client_init() — a notification could in theory
-    // arrive as soon as the BLE stack is up, and it needs to know which
-    // apps are filtered.
-    notification_filter_settings_init();
-
-    ancs_client_init();  // BLE + ANCS (iPhone notification bridge) — see ancs_client.cpp
+    // Must happen before build_ui() — unlike most other _settings modules,
+    // this one is read during the clock screen's initial construction
+    // (apply_background()), not just applied later by a background task.
+    background_settings_init();
+    background_settings_set_changed_cb(on_background_changed);
 
     lv_obj_t *clock_scr = lv_scr_act();
 
@@ -1108,8 +1112,6 @@ extern "C" void app_main(void)
 
     dimmer_settings_init();
     dimmer_settings_set_changed_cb(on_dimmer_settings_changed);
-
-    notification_store_set_changed_cb(on_notification_store_changed);
 
     stocks_store_init();
     stocks_store_set_changed_cb(on_stocks_store_changed);

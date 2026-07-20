@@ -3,6 +3,7 @@
 #include <stdbool.h>
 
 #define WEATHER_FORECAST_DAYS 5
+#define WEATHER_HOURLY_COUNT  6
 
 typedef struct {
     char  date[11];  // "YYYY-MM-DD"
@@ -13,6 +14,13 @@ typedef struct {
 } weather_daily_t;
 
 typedef struct {
+    char  time[6];    // "HH:MM", local time
+    float temp_c;
+    int   weather_code;   // WMO code for that hour (see weather_code_description())
+    int   precip_prob;    // % chance of precipitation that hour, 0-100 (-1 if unavailable)
+} weather_hourly_t;
+
+typedef struct {
     float min_c;         // today's min (== daily[0].min_c)
     float current_c;
     float max_c;         // today's max (== daily[0].max_c)
@@ -21,6 +29,11 @@ typedef struct {
     char  sunset[6];     // "HH:MM", today, local time
     weather_daily_t daily[WEATHER_FORECAST_DAYS];
     int   daily_count;
+    // Rolling forecast for the next WEATHER_HOURLY_COUNT hours, starting from
+    // the current hour (via Open-Meteo's forecast_hours param) — not fixed to
+    // midnight-aligned slots.
+    weather_hourly_t hourly[WEATHER_HOURLY_COUNT];
+    int   hourly_count;
 } weather_data_t;
 
 #ifdef __cplusplus
