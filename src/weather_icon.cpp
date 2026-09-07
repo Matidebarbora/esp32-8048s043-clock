@@ -45,6 +45,15 @@ static const lv_img_dsc_t *pick(weather_icon_kind_t kind, lv_coord_t size, bool 
 // extra periodic redraw this adds. Sun rotates continuously; everything
 // else (moon, clouds, rain, snow, fog, storm) gently bobs up and down.
 //
+// A 16-frame pre-baked sprite-cycle version of the sun rotation was tried
+// and rejected in favor of this one: with only 16 frames, matching this
+// version's slow ~36s/turn would look like visible discrete jumps rather
+// than a spin — sprites needed a much faster ~3.2s/turn (16 frames * 200ms)
+// to look smooth, which read as too fast. More frames would fix that at a
+// flash-size cost (30 KB per 100x100 frame) but weren't worth it for how
+// this one already looks — don't re-attempt the sprite approach for pure
+// rotation without a reason to revisit that tradeoff.
+//
 // Runs on a slow (200ms, ~5 steps/sec) lv_timer rather than LVGL's
 // smooth-by-default lv_anim (which would tick every 20ms task-handler
 // cycle, ~50/sec): full_refresh=1 means *any* invalidation forces a
