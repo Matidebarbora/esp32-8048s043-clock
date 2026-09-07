@@ -9,10 +9,12 @@
 static const char *TAG    = "app_settings";
 static const char *NVS_NS = "app_settings";
 
-// Winter is 1 hour behind the previous UTC-3 default (UTC-4); summer is
-// 2 hours behind that same reference (UTC-5).
+// Chile: standard (winter) time is UTC-4; daylight saving (summer) time is
+// UTC-3, one hour *ahead* of winter — not behind it. TZ_SUMMER was
+// previously UTC-5 (two hours off, in the wrong direction), making summer
+// clocks read 2h behind what they should.
 #define TZ_WINTER "<-04>4"
-#define TZ_SUMMER "<-05>5"
+#define TZ_SUMMER "<-03>3"
 
 static dst_mode_t s_dst_mode = DST_WINTER;
 
