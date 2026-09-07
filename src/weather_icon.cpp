@@ -39,9 +39,71 @@ static const lv_img_dsc_t *pick(weather_icon_kind_t kind, lv_coord_t size, bool 
     }
 }
 
+// ── Lightweight animation, main (100px) icon only ───────────────────────────
+// Forecast-row/hourly-strip icons (32px, see the `size > 32` gate below)
+// stay static, both to keep those dense lists calm and to limit how much
+// extra periodic redraw this adds. Sun rotates continuously; everything
+// else (moon, clouds, rain, snow, fog, storm) gently bobs up and down.
+//
+// Runs on a slow (200ms, ~5 steps/sec) lv_timer rather than LVGL's
+// smooth-by-default lv_anim (which would tick every 20ms task-handler
+// cycle, ~50/sec): full_refresh=1 means *any* invalidation forces a
+// complete 800x480 SW re-render (see CLAUDE.md's RGB panel timing notes on
+// pixel-clock margin under heavy redraw), so this deliberately trades away
+// silky-smooth motion for a redraw cadence closer to the clock's own
+// already-proven-stable 1/sec tick.
+struct IconAnimState {
+    lv_obj_t   *img;
+    lv_timer_t *timer;
+    bool        rotate;    // true: spin (sun only); false: bob
+    int16_t     angle;     // 0.1-degree units, per lv_img_set_angle()
+    lv_coord_t  bob_y;
+    int8_t      bob_dir;
+};
+
+#define ICON_ANIM_PERIOD_MS 200
+
+static void icon_anim_timer_cb(lv_timer_t *timer)
+{
+    auto *st = (IconAnimState *)timer->user_data;
+    if (st->rotate) {
+        st->angle = (st->angle + 20) % 3600;  // 2°/tick -> full turn in ~36s
+        lv_img_set_angle(st->img, st->angle);
+    } else {
+        st->bob_y += st->bob_dir;
+        if (st->bob_y >= 4 || st->bob_y <= -4) st->bob_dir = (int8_t)-st->bob_dir;
+        lv_obj_set_style_translate_y(st->img, st->bob_y, 0);  // visual-only offset, doesn't disturb the parent's flex layout
+    }
+}
+
+// The icon is rebuilt from scratch whenever the weather code or day/night
+// state changes (see update_sun_arc() in main.cpp: lv_obj_clean() + a fresh
+// weather_icon_create() call) — free the timer and its state right along
+// with the image object instead of leaking one every time that happens.
+static void icon_anim_cleanup_cb(lv_event_t *e)
+{
+    auto *st = (IconAnimState *)lv_event_get_user_data(e);
+    lv_timer_del(st->timer);
+    delete st;
+}
+
+static void attach_animation(lv_obj_t *img, weather_icon_kind_t kind, bool is_night)
+{
+    auto *st    = new IconAnimState{};
+    st->img     = img;
+    st->rotate  = (kind == WI_SUN && !is_night);
+    st->bob_dir = 1;
+    st->timer   = lv_timer_create(icon_anim_timer_cb, ICON_ANIM_PERIOD_MS, st);
+    lv_obj_add_event_cb(img, icon_anim_cleanup_cb, LV_EVENT_DELETE, st);
+}
+
 lv_obj_t *weather_icon_create(lv_obj_t *parent, int weather_code, lv_coord_t size, bool is_night)
 {
     lv_obj_t *img = lv_img_create(parent);
-    lv_img_set_src(img, pick(classify(weather_code), size, is_night));
+    weather_icon_kind_t kind = classify(weather_code);
+    lv_img_set_src(img, pick(kind, size, is_night));
+
+    if (size > 32) attach_animation(img, kind, is_night);
+
     return img;
 }
