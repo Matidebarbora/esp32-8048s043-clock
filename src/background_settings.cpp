@@ -8,16 +8,16 @@ static const char *TAG    = "background_settings";
 static const char *NVS_NS = "background";
 
 const background_option_t BACKGROUND_OPTIONS[] = {
-    { "Black",           8,  8, 10, false,  0,  0,  0 },
-    { "Charcoal",       18, 18, 20, false,  0,  0,  0 },
-    { "Navy",            8, 10, 22, false,  0,  0,  0 },
-    { "Forest",          8, 18, 10, false,  0,  0,  0 },
-    { "Plum",           18,  8, 20, false,  0,  0,  0 },
-    { "Maroon",         22,  8, 10, false,  0,  0,  0 },
-    { "Espresso",       20, 14,  8, false,  0,  0,  0 },
-    { "Black to Brown",  8,  8, 10, true,  70, 42, 18 },
-    { "Black to Navy",   8,  8, 10, true,  14, 22, 60 },
-    { "Plum to Black",  40, 16, 48, true,   8,  8, 10 },
+    { "Black",             8,  8, 10, false,  0,  0,  0 },
+    { "Cyan to Charcoal", 10, 70, 78, true,  18, 18, 20 },
+    { "Navy",              8, 10, 22, false,  0,  0,  0 },
+    { "Forest",            8, 18, 10, false,  0,  0,  0 },
+    { "Plum",             18,  8, 20, false,  0,  0,  0 },
+    { "Maroon",           22,  8, 10, false,  0,  0,  0 },
+    { "Espresso",         20, 14,  8, false,  0,  0,  0 },
+    { "Black to Brown",    8,  8, 10, true,  70, 42, 18 },
+    { "Black to Navy",     8,  8, 10, true,  14, 22, 60 },
+    { "Plum to Black",    40, 16, 48, true,   8,  8, 10 },
 };
 const int BACKGROUND_OPTION_COUNT = sizeof(BACKGROUND_OPTIONS) / sizeof(BACKGROUND_OPTIONS[0]);
 
