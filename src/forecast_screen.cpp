@@ -9,13 +9,39 @@
 
 #define CARD_MARGIN 24
 
-static lv_obj_t *s_clock_scr = nullptr;
+#define AUTO_HOME_TIMEOUT_MS 10000  // auto-return to the clock after this long on the forecast screen
+
+static lv_obj_t   *s_clock_scr      = nullptr;
+static lv_obj_t   *s_forecast_scr   = nullptr;
+static lv_timer_t *s_timeout_timer  = nullptr;
+
+static void cancel_auto_home_timer()
+{
+    if (s_timeout_timer) {
+        lv_timer_del(s_timeout_timer);
+        s_timeout_timer = nullptr;
+    }
+}
 
 static void on_home_click(lv_event_t *e)
 {
     lv_obj_t *settings_scr = lv_obj_get_screen(lv_event_get_target(e));
+    cancel_auto_home_timer();
     lv_disp_load_scr(s_clock_scr);
     lv_obj_del_async(settings_scr);
+}
+
+// Fires once, AUTO_HOME_TIMEOUT_MS after the screen opened, if the user
+// hasn't already tapped Home (which cancels this timer). Runs inside
+// lv_task_handler() (see CLAUDE.md's LVGL UI notes) — no lvgl_acquire()
+// needed. Self-deletes rather than relying on lv_timer_set_repeat_count,
+// since it never needs to fire more than once.
+static void on_auto_home_timeout(lv_timer_t *timer)
+{
+    lv_timer_del(timer);
+    s_timeout_timer = nullptr;
+    lv_disp_load_scr(s_clock_scr);
+    lv_obj_del_async(s_forecast_scr);
 }
 
 // "YYYY-MM-DD" -> "Wed 07/02". Falls back to the raw string on parse failure.
@@ -114,6 +140,7 @@ static void build_day_row(lv_obj_t *parent, const weather_daily_t *d, bool is_to
 void forecast_screen_show(lv_obj_t *clock_scr)
 {
     s_clock_scr = clock_scr;
+    cancel_auto_home_timer();  // defensive — shouldn't be one pending, but don't leak it if there is
 
     weather_data_t wd;
     bool have_data = weather_get_last(&wd);
@@ -162,6 +189,9 @@ void forecast_screen_show(lv_obj_t *clock_scr)
         for (int i = 0; i < wd.daily_count; i++)
             build_day_row(card, &wd.daily[i], i == 0, i == wd.daily_count - 1);
     }
+
+    s_forecast_scr  = scr;
+    s_timeout_timer = lv_timer_create(on_auto_home_timeout, AUTO_HOME_TIMEOUT_MS, nullptr);
 
     lv_disp_load_scr(scr);
 }
