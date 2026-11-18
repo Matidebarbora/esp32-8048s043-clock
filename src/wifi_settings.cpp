@@ -39,6 +39,21 @@ static void on_home_click(lv_event_t *e)
     lv_obj_del_async(settings_scr);
 }
 
+// Adds one row to the network list. `saved` rows get the green check and open
+// the "Forget this network" screen when tapped; the rest open password entry.
+static void add_network_button(lv_obj_t *list, const char *ssid, const char *label, bool saved)
+{
+    char *ssid_copy = strdup(ssid);
+    lv_obj_t *btn = lv_list_add_btn(list, LV_SYMBOL_WIFI, label);
+    if (saved) {
+        lv_obj_t *check = lv_label_create(btn);
+        lv_label_set_text(check, LV_SYMBOL_OK);
+        lv_obj_set_style_text_color(check, lv_color_make(60, 200, 100), 0);
+    }
+    lv_obj_add_event_cb(btn, on_network_click, LV_EVENT_CLICKED, ssid_copy);
+    lv_obj_add_event_cb(btn, free_user_data_cb, LV_EVENT_DELETE, ssid_copy);
+}
+
 static void wifi_scan_task(void *)
 {
     // wifi_settings_show() just triggered a full-screen LVGL redraw (new
@@ -58,26 +73,42 @@ static void wifi_scan_task(void *)
     lvgl_acquire();
     if (s_active_list) {
         lv_obj_clean(s_active_list);
-        if (ret != ESP_OK) {
-            lv_list_add_text(s_active_list, "Error scanning networks");
-        } else if (count == 0) {
-            lv_list_add_text(s_active_list, "No networks found");
-        } else {
+
+        // Scanned networks first (strongest-first as returned by the driver).
+        bool scan_ok = (ret == ESP_OK);
+        if (scan_ok) {
             for (uint16_t i = 0; i < count; i++) {
                 char label[33 + 24];
                 snprintf(label, sizeof(label), "%s  (%d dBm)%s",
                         aps[i].ssid, aps[i].rssi, aps[i].secure ? "" : "  [open]");
-
-                char *ssid_copy = strdup(aps[i].ssid);
-                lv_obj_t *btn = lv_list_add_btn(s_active_list, LV_SYMBOL_WIFI, label);
-                if (wifi_store_is_known(aps[i].ssid)) {
-                    lv_obj_t *check = lv_label_create(btn);
-                    lv_label_set_text(check, LV_SYMBOL_OK);
-                    lv_obj_set_style_text_color(check, lv_color_make(60, 200, 100), 0);
-                }
-                lv_obj_add_event_cb(btn, on_network_click, LV_EVENT_CLICKED, ssid_copy);
-                lv_obj_add_event_cb(btn, free_user_data_cb, LV_EVENT_DELETE, ssid_copy);
+                add_network_button(s_active_list, aps[i].ssid, label,
+                                   wifi_store_is_known(aps[i].ssid));
             }
+        }
+
+        // Then every saved network the scan did not see (out of range, hidden,
+        // or the scan failed) so it can still be reviewed and forgotten.
+        const wifi_saved_network_t *saved = nullptr;
+        size_t saved_n  = wifi_store_get_all(&saved);
+        size_t extra    = 0;
+        for (size_t i = 0; i < saved_n; i++) {
+            bool seen = false;
+            for (uint16_t j = 0; scan_ok && j < count; j++)
+                if (strcmp(saved[i].ssid, aps[j].ssid) == 0) { seen = true; break; }
+            if (seen) continue;
+
+            char label[33 + 24];
+            snprintf(label, sizeof(label), "%s  (saved, not in range)", saved[i].ssid);
+            add_network_button(s_active_list, saved[i].ssid, label, true);
+            extra++;
+        }
+
+        if (!scan_ok && extra == 0) {
+            lv_list_add_text(s_active_list, "Error scanning networks");
+        } else if (!scan_ok) {
+            lv_list_add_text(s_active_list, "Scan failed - showing saved networks only");
+        } else if (count == 0 && extra == 0) {
+            lv_list_add_text(s_active_list, "No networks found");
         }
     }
     lvgl_release();
