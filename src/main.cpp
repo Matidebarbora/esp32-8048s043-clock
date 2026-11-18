@@ -787,8 +787,10 @@ static void update_sun_arc(const struct tm *ti)
     weather_data_t wd;
     if (!weather_get_last(&wd)) return;
 
-    lv_label_set_text(g_sunrise_label, wd.sunrise);
-    lv_label_set_text(g_sunset_label, wd.sunset);
+    // lv_label_set_text() always invalidates (and with full_refresh that means
+    // a whole-frame re-render), even for identical text - only touch on change.
+    if (strcmp(lv_label_get_text(g_sunrise_label), wd.sunrise) != 0) lv_label_set_text(g_sunrise_label, wd.sunrise);
+    if (strcmp(lv_label_get_text(g_sunset_label),  wd.sunset)  != 0) lv_label_set_text(g_sunset_label,  wd.sunset);
 
     int  sunrise_min    = hhmm_to_minutes(wd.sunrise);
     int  sunset_min     = hhmm_to_minutes(wd.sunset);
@@ -826,9 +828,14 @@ static void update_sun_arc(const struct tm *ti)
 
     int x, y;
     arc_point(theta, &x, &y);
-    lv_img_set_src(g_sun_marker, is_night ? &img_weather_moon_32 : &img_weather_sun_32);
-    lv_obj_clear_flag(g_sun_marker, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_set_pos(g_sun_marker, x - 16, y - 16);  // 32x32 icon, centered on the arc point
+    static int  s_marker_x = -9999, s_marker_y = -9999;
+    static bool s_marker_night = false;
+    if (x != s_marker_x || y != s_marker_y || is_night != s_marker_night) {
+        s_marker_x = x; s_marker_y = y; s_marker_night = is_night;
+        lv_img_set_src(g_sun_marker, is_night ? &img_weather_moon_32 : &img_weather_sun_32);
+        lv_obj_clear_flag(g_sun_marker, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_pos(g_sun_marker, x - 16, y - 16);  // 32x32 icon, centered on the arc point
+    }
 }
 
 // Called by lv_timer every second — runs inside lv_task_handler, no mutex needed
@@ -843,9 +850,12 @@ static void clock_tick_cb(lv_timer_t *)
     char tbuf[12], dbuf[32];
     strftime(tbuf, sizeof(tbuf), "%H:%M:%S", &ti);
     strftime(dbuf, sizeof(dbuf), "%A %d %B %Y", &ti);
+    static char s_prev_t[12] = "";
     for (int i = 0; i < 8 && tbuf[i]; i++)
-        lv_img_set_src(g_time_digits[i], time_char_img(tbuf[i]));
-    lv_label_set_text(g_date_label, dbuf);
+        if (tbuf[i] != s_prev_t[i])
+            lv_img_set_src(g_time_digits[i], time_char_img(tbuf[i]));
+    strlcpy(s_prev_t, tbuf, sizeof(s_prev_t));
+    if (strcmp(lv_label_get_text(g_date_label), dbuf) != 0) lv_label_set_text(g_date_label, dbuf);
     update_sun_arc(&ti);
 }
 
@@ -872,8 +882,14 @@ static void wifi_status_tick_cb(lv_timer_t *)
 {
     char ssid[33];
     bool connected = wifi_get_connected_ssid(ssid, sizeof(ssid));
-    lv_obj_set_style_text_color(g_wifi_icon,
-        connected ? lv_color_make(60, 200, 100) : lv_color_make(150, 70, 70), 0);
+    // Only touch the widget when the state actually changed: every style set
+    // invalidates and, with full_refresh, forces a whole-frame re-render.
+    static int s_prev_wifi = -1;
+    if ((int)connected != s_prev_wifi) {
+        s_prev_wifi = connected;
+        lv_obj_set_style_text_color(g_wifi_icon,
+            connected ? lv_color_make(60, 200, 100) : lv_color_make(150, 70, 70), 0);
+    }
 }
 
 // If the Wi-Fi connection is ever down (failed at boot, or dropped later),

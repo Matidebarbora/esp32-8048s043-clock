@@ -31,6 +31,12 @@ static bool s_wifi_initialized = false;
 // must not touch the driver at the same time.
 static SemaphoreHandle_t s_wifi_op_mutex;
 
+// Set by wifi_scan() while it waits for the mutex, so a long-running
+// wifi_connect_any() sweep (the background reconnect retries up to
+// N networks x timeout) bails out between networks instead of making the
+// Wi-Fi settings screen sit on "Scanning..." for tens of seconds.
+static volatile bool s_scan_pending = false;
+
 // Returns elapsed milliseconds since a reference tick
 static inline uint32_t elapsed_ms(TickType_t t_start)
 {
@@ -95,6 +101,16 @@ esp_err_t wifi_connect_any(const wifi_network_t *networks, size_t count,
     xSemaphoreTake(s_wifi_op_mutex, portMAX_DELAY);
     wifi_stack_init_once();
 
+    // wifi_reconnect_task decides "Wi-Fi is down" *before* waiting on the
+    // mutex, so by the time it gets in, the boot-time connect may have just
+    // succeeded. Don't tear down a working connection (that killed the NTP
+    // sync and every HTTPS request in flight).
+    wifi_ap_record_t already;
+    if (esp_wifi_sta_get_ap_info(&already) == ESP_OK) {
+        xSemaphoreGive(s_wifi_op_mutex);
+        return ESP_OK;
+    }
+
     ESP_LOGI(TAG, "WiFi started — %lu ms/network, networks: %zu",
              (unsigned long)per_network_timeout_ms, count);
 
@@ -108,19 +124,42 @@ esp_err_t wifi_connect_any(const wifi_network_t *networks, size_t count,
 
         if (cb) cb(networks[i].ssid, i, count);
 
+        if (s_scan_pending) {
+            ESP_LOGI(TAG, "Scan requested - abandoning connect sweep");
+            break;
+        }
+
+        // The driver may still be mid-"connecting" from the previous attempt
+        // (esp_wifi_disconnect() is asynchronous); esp_wifi_set_config() then
+        // fails with ESP_ERR_WIFI_STATE ("sta is connecting"). That used to be
+        // an ESP_ERROR_CHECK -> abort() -> endless reboot loop. Always drop
+        // any pending attempt first and treat remaining errors as "this
+        // network failed", never as fatal.
+        esp_wifi_disconnect();
+        vTaskDelay(pdMS_TO_TICKS(150));
         xEventGroupClearBits(s_wifi_group, CONNECTED_BIT | FAIL_BIT);
 
         wifi_config_t wifi_cfg = {};
         strlcpy((char *)wifi_cfg.sta.ssid,     networks[i].ssid,     sizeof(wifi_cfg.sta.ssid));
         strlcpy((char *)wifi_cfg.sta.password, networks[i].password, sizeof(wifi_cfg.sta.password));
 
-        ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
-        ESP_ERROR_CHECK(esp_wifi_connect());
+        esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg);
+        if (err == ESP_OK) err = esp_wifi_connect();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Could not start connect to \"%s\": %s",
+                     networks[i].ssid, esp_err_to_name(err));
+            continue;
+        }
 
-        EventBits_t bits = xEventGroupWaitBits(s_wifi_group,
-                                               CONNECTED_BIT | FAIL_BIT,
-                                               pdFALSE, pdFALSE,
-                                               pdMS_TO_TICKS(per_network_timeout_ms));
+        // Wait in short slices so a pending scan can interrupt us.
+        EventBits_t bits  = 0;
+        uint32_t    waited = 0;
+        while (waited < per_network_timeout_ms && !s_scan_pending) {
+            bits = xEventGroupWaitBits(s_wifi_group, CONNECTED_BIT | FAIL_BIT,
+                                       pdFALSE, pdFALSE, pdMS_TO_TICKS(250));
+            if (bits) break;
+            waited += 250;
+        }
 
         if (bits & CONNECTED_BIT) {
             ESP_LOGI(TAG, "[%lu ms] Connected to \"%s\"",
@@ -155,7 +194,20 @@ esp_err_t wifi_scan(wifi_ap_info_t **out_aps, uint16_t *out_count)
     // 10 s whenever Wi-Fi is down (the exact moment a user is likely to open
     // this screen). Share s_wifi_op_mutex with connect so the scan simply
     // waits its turn instead of racing and failing.
+    s_scan_pending = true;
     xSemaphoreTake(s_wifi_op_mutex, portMAX_DELAY);
+    s_scan_pending = false;
+
+    // A scan cannot start while the driver is mid-connect (the reconnect task
+    // leaves it in that state whenever saved networks are out of range) -
+    // esp_wifi_scan_start() fails with ESP_ERR_WIFI_STATE or returns nothing,
+    // which is why the list came up empty. If we're not associated, cancel
+    // any pending connect attempt first.
+    wifi_ap_record_t cur;
+    if (esp_wifi_sta_get_ap_info(&cur) != ESP_OK) {
+        esp_wifi_disconnect();
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
 
     wifi_scan_config_t scan_cfg = {};
     scan_cfg.show_hidden = false;
@@ -176,6 +228,7 @@ esp_err_t wifi_scan(wifi_ap_info_t **out_aps, uint16_t *out_count)
         return ESP_OK;
     }
 
+    if (ap_count > 20) ap_count = 20;  // bound RAM + number of LVGL list buttons
     auto *records = (wifi_ap_record_t *)malloc(sizeof(wifi_ap_record_t) * ap_count);
     if (!records) {
         xSemaphoreGive(s_wifi_op_mutex);
@@ -220,9 +273,12 @@ esp_err_t wifi_connect_one(const char *ssid, const char *password, uint32_t time
     strlcpy((char *)wifi_cfg.sta.ssid,     ssid,     sizeof(wifi_cfg.sta.ssid));
     strlcpy((char *)wifi_cfg.sta.password, password, sizeof(wifi_cfg.sta.password));
 
+    esp_wifi_disconnect();  // drop any existing/pending connection first (set_config fails while "connecting")
+    vTaskDelay(pdMS_TO_TICKS(150));
+    xEventGroupClearBits(s_wifi_group, CONNECTED_BIT | FAIL_BIT);
+
     esp_err_t ret = esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg);
     if (ret == ESP_OK) {
-        esp_wifi_disconnect();  // drop any existing connection first
         ret = esp_wifi_connect();
     }
 
