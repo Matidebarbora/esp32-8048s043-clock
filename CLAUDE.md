@@ -37,7 +37,7 @@ Time zone (winter/summer DST) is **not** in `config.h` — it's chosen at runtim
 | `main.cpp` | `app_main()`, `build_ui()` (the whole clock screen), background tasks (`weather_task`, `wifi_reconnect_task`, `dimmer_task`), the sun-path arc math |
 | `lcd.cpp` / `lcd.h` | RGB panel + GT911 touch init, LVGL task, `lvgl_acquire()`/`lvgl_release()`, PWM backlight (`lcd_set_backlight()`) |
 | `wifi_time.cpp` | `wifi_connect_any()` / `wifi_connect_one()` (mutex-serialized against each other), SNTP `time_sync()`. `wifi_connect_any()`'s timeout is **per-network**, not a shared budget — see "Multi-network Wi-Fi connect" below |
-| `wifi_settings.cpp` | WiFi settings screen: scan, connect (with on-screen keyboard password entry), forget saved networks |
+| `wifi_settings.cpp` | WiFi settings screen: scan, connect (with on-screen keyboard password entry), forget saved networks. The list shows scan results first, then every saved network the scan did not see ("saved, not in range") so out-of-range ones can still be forgotten |
 | `wifi_store.cpp` | NVS-backed saved-network list consumed by `wifi_settings.cpp` and merged into connect candidates by `main.cpp` |
 | `app_settings.cpp` | NVS-backed app settings — currently just DST mode (winter/summer), sets the POSIX `TZ` env var |
 | `settings_screen.cpp` | Settings menu (gear icon) — list of sub-screens |
@@ -79,6 +79,20 @@ Time zone (winter/summer DST) is **not** in `config.h` — it's chosen at runtim
 
 - **Its timeout parameter is *per network*, not a shared total budget.** This was originally a single budget shared across the whole loop (`total_timeout_ms`), which had a real bug: if the first candidate was slow to fail (out of range, stale password, weak signal), it could eat the entire budget and the loop would `break` before ever *trying* the remaining saved networks — so a board with several saved networks behaved as if it only ever tried one. The fix gives **each** attempt its own full `per_network_timeout_ms` (`xEventGroupWaitBits` is waited afresh per network), so every saved network gets a real shot regardless of how long the ones before it took to fail. Call sites: 8 s/network at boot, 6 s/network in `wifi_reconnect_task`. Consequence to keep in mind: a full sweep of N unreachable networks now takes up to N × per-network-timeout, which can exceed the 10 s gap between `wifi_reconnect_task` retries — that's fine (the task has nothing else to do and the connect mutex serializes it against manual connects), but don't "optimize" it back into a shared budget.
 - **`wifi_time.cpp` must `#include <time.h>`** for `time_sync()` (`tzset`, `time_t`, `struct tm`, `time()`, `localtime_r()`). This include was missing for a long time but stayed hidden: on macOS the build died earlier on the `LV_MEM_POOL_ALLOC` shell-parse error (see LVGL configuration below) before the compiler ever reached this file, so the missing-include error only surfaced once that was fixed. Not macOS-specific — it was always missing; fixing the earlier failure just let the build get far enough to reveal it.
+
+### Wi-Fi robustness rules (wifi_time.cpp)
+
+Hard-won, in the order they'd bite again:
+
+- **Never `ESP_ERROR_CHECK` the connect path.** `esp_wifi_set_config()` returns `ESP_ERR_WIFI_STATE` ("sta is connecting") while a previous attempt is still pending (`esp_wifi_disconnect()` is asynchronous). As an `ESP_ERROR_CHECK` that `abort()`ed and produced an endless reboot loop whenever saved networks were out of range. `wifi_connect_any()`/`wifi_connect_one()` now call `esp_wifi_disconnect()` + a short delay before each `set_config`, and treat remaining errors as "this network failed".
+- **A scan cannot start while the driver is mid-connect** — it fails or returns nothing (empty list). `wifi_scan()` cancels a pending connect first if the STA is not associated, and sets `s_scan_pending` while waiting for the op mutex so a long `wifi_connect_any()` sweep bails out between networks (it waits in 250 ms slices) instead of making the settings screen sit on "Scanning..." for tens of seconds. Scan results are capped at 20.
+- **`wifi_connect_any()` returns early if already associated.** `wifi_reconnect_task` decides "Wi-Fi is down" *before* waiting on the mutex; if the boot-time connect succeeded in the meantime, the reconnect used to disconnect the working link mid-NTP/HTTPS (symptoms: time never appears, weather/stocks fail with `ESP_ERR_HTTP_CONNECT`, a second `Got IP` in the log). Keep that guard.
+- **Check the flashed firmware matches the source before debugging.** A reboot loop once turned out to be an old image still on the board (log text from a removed budget-based connect loop) — compare the serial log's strings against the current source first.
+- `sdkconfig.defaults` trims the Wi-Fi buffer counts (`CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6`, dynamic RX/TX = 16) to spare internal RAM. Not measured; if throughput problems show up, suspect these first.
+
+### Redraw cost (main.cpp, weather_icon.cpp)
+
+`full_refresh = 1` means **any** invalidation — even setting a label to identical text, re-setting the same image source, or re-applying the same style — forces a complete 800x480 software re-render. So: only touch widgets when the value actually changed (`clock_tick_cb`, `update_sun_arc`, `wifi_status_tick_cb` all cache the previous value), and don't add periodic animation timers. The main weather icon used to animate (sun spin / bob via a 200 ms timer, ~5 full-frame renders/sec) and was removed for exactly this reason; icons are static. The sun/moon marker on the day arc intentionally still moves (it only changes position every few minutes and is guarded to update only on change).
 
 ### LVGL configuration
 
