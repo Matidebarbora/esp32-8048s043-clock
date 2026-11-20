@@ -28,7 +28,7 @@ After changing `sdkconfig.defaults`, delete `.pio/build` before rebuilding so th
 - **`NTP_SERVER`** — defaults to `"pool.ntp.org"`.
 - **`FALLBACK_LATITUDE` / `FALLBACK_LONGITUDE`** — used for the weather card only if IP geolocation (`geolocation.cpp`) fails; normally location is auto-detected.
 
-Time zone (winter/summer DST) is **not** in `config.h` — it's chosen at runtime via the Settings screen and persisted to NVS by `app_settings.cpp`.
+Time zone is **not** in `config.h`. By default (**Automatic**) it follows the IP-geolocated UTC offset (including DST) from `geolocation.cpp`; the Settings > Season Time screen can force Winter (UTC-4) / Summer (UTC-3) instead. The mode and the last-seen offset are persisted to NVS by `app_settings.cpp`.
 
 ## File structure
 
@@ -39,13 +39,13 @@ Time zone (winter/summer DST) is **not** in `config.h` — it's chosen at runtim
 | `wifi_time.cpp` | `wifi_connect_any()` / `wifi_connect_one()` (mutex-serialized against each other), SNTP `time_sync()`. `wifi_connect_any()`'s timeout is **per-network**, not a shared budget — see "Multi-network Wi-Fi connect" below |
 | `wifi_settings.cpp` | WiFi settings screen: scan, connect (with on-screen keyboard password entry), forget saved networks. The list shows scan results first, then every saved network the scan did not see ("saved, not in range") so out-of-range ones can still be forgotten |
 | `wifi_store.cpp` | NVS-backed saved-network list consumed by `wifi_settings.cpp` and merged into connect candidates by `main.cpp` |
-| `app_settings.cpp` | NVS-backed app settings — currently just DST mode (winter/summer), sets the POSIX `TZ` env var |
+| `app_settings.cpp` | NVS-backed time-zone settings — mode `DST_AUTO` (default; TZ built from the IP-derived UTC offset, cached in NVS) or manual `DST_WINTER`/`DST_SUMMER`; sets the POSIX `TZ` env var |
 | `settings_screen.cpp` | Settings menu (gear icon) — list of sub-screens |
-| `season_time_screen.cpp` | Settings sub-screen: winter/summer DST toggle |
+| `season_time_screen.cpp` | Settings sub-screen: Automatic / Winter / Summer time-zone selector |
 | `dimmer_settings.cpp` / `dimmer_screen.cpp` | NVS-backed backlight dimmer (OFF/ON/AUTO with scheduled start/end times) + its settings sub-screen |
 | `background_settings.cpp` / `background_screen.cpp` | NVS-backed screen background choice (`BACKGROUND_OPTIONS[]` — solid colors and top-to-bottom gradients, index 0 always black) + its settings sub-screen (scrollable list of swatches). Unlike the other `_settings` modules, `background_settings_init()` must run *before* `build_ui()` — see "Startup sequence" below |
 | `weather.cpp` / `weather_icon.cpp` / `weather_icons_data.c` | Open-Meteo fetch/parse + cache, WMO-code-to-icon classification, Twemoji-derived icon bitmaps (sun/moon/cloud/rain/snow/storm, 100px + 32px) |
-| `geolocation.cpp` | One-time IP-based geolocation (ip-api.com) for the weather card's coordinates |
+| `geolocation.cpp` | IP-based geolocation (ip-api.com): city, coordinates **and current UTC offset** — drives both the weather card's coordinates and the automatic time zone |
 | `forecast_screen.cpp` | 5-day forecast screen (tap the weather card) |
 | `time_digits_data.c` / `bulb_icon_data.c` | Generated image assets — big clock digits, brightness bulb icon |
 | `stocks.cpp` / `stocks_store.cpp` / `stocks_screen.cpp` | Yahoo Finance search/quote fetch (no API key — unofficial endpoints), NVS-backed pinned-symbol list (max 3), and the Settings sub-screen to search/pin/unpin — see "Stock tracking" below |
@@ -70,7 +70,7 @@ Time zone (winter/summer DST) is **not** in `config.h` — it's chosen at runtim
 6. `wifi_store_init()` + `build_connect_candidates()`, `wifi_time_init()` (creates the connect mutex — must happen before any task that might call `wifi_connect_any()`/`wifi_connect_one()` is spawned)
 7. `dimmer_settings_init()` + change-callback
 8. Spawn `weather_task`, `wifi_reconnect_task`, `dimmer_task`
-9. `wifi_connect_any()` (8 s **per saved network**, see below) → on success, `time_sync()` (SNTP). On WiFi/NTP failure, time and date are simply left blank — no manual entry fallback; `clock_tick_cb()` no-ops while the system clock is unset (`tm_year <= 70`)
+9. `wifi_connect_any()` (8 s **per saved network**, see below) → on success, `location_refresh()` (IP geolocation → coordinates + UTC offset → TZ) and then `time_sync()` (SNTP), so the clock comes up in the right zone. On WiFi/NTP failure, time and date are simply left blank — no manual entry fallback; `clock_tick_cb()` no-ops while the system clock is unset (`tm_year <= 70`)
 10. `vTaskSuspend(NULL)` — everything from here on is timer/task driven, `app_main` is no longer needed
 
 ### Multi-network Wi-Fi connect (wifi_time.cpp)
@@ -143,7 +143,7 @@ All GPIO assignments are in `src/lcd.h`. Key ones:
 
 ### Weather (weather.cpp, geolocation.cpp)
 
-Open-Meteo (`api.open-meteo.com`) needs no API key but also has no built-in IP geolocation — coordinates come from a one-time `ip-api.com` lookup at boot (`geolocation.cpp`), falling back to `FALLBACK_LATITUDE`/`FALLBACK_LONGITUDE` in `config.h` if that fails. `weather_task` (in `main.cpp`) re-fetches every 15 minutes (30 s retry on failure) and caches the last successful result via `weather_set_last()`/`weather_get_last()` so `forecast_screen.cpp` can read it without a network round trip.
+Open-Meteo (`api.open-meteo.com`) needs no API key but also has no built-in IP geolocation — coordinates come from an `ip-api.com` lookup (`geolocation.cpp`, wrapped by `location_refresh()` in `main.cpp`), falling back to `FALLBACK_LATITUDE`/`FALLBACK_LONGITUDE` in `config.h` if that fails. The lookup runs at boot (before the first NTP sync), is retried by `weather_task` until it succeeds, and refreshed every 6 h — so a DST change or moving the clock to another network updates both the weather location and the time zone with no user action. ip-api's `offset` field is the *current* offset including DST; `app_settings.cpp` turns it into a fixed POSIX TZ like `<-03>3` (re-derived on each refresh rather than relying on DST rules). TZ changes are applied under `lvgl_acquire()` so they don't race the clock tick's `localtime_r()`. `weather_task` (in `main.cpp`) re-fetches every 15 minutes (30 s retry on failure) and caches the last successful result via `weather_set_last()`/`weather_get_last()` so `forecast_screen.cpp` can read it without a network round trip.
 
 The sun-path arc on the main screen is a full 24h day/night loop, not just the daylight portion: geometry constants (`SUN_ARC_CX/CY/RADIUS` in `main.cpp`) define a circle whose horizontal diameter is the horizon — the marker travels 180°→0° over the top from sunrise to sunset (day), then continues 0°→-180° under the bottom from sunset back to the next sunrise (night), swapping between the sun and moon icon assets (`weather_icons_data.c`) at each crossing.
 

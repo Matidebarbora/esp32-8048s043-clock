@@ -966,6 +966,40 @@ static void dimmer_task(void *)
     }
 }
 
+// ── IP-based location (coordinates + time zone) ─────────────────────────────
+// One lookup feeds both the weather coordinates and the time zone: ip-api's
+// "offset" is the current UTC offset including DST, applied via
+// app_settings_apply_utc_offset() when the time-zone mode is Automatic.
+// Called from app_main (before the first NTP sync, so the clock comes up in
+// the right zone) and from weather_task (retry + 6-hourly refresh); the mutex
+// keeps those two from running a lookup at the same time.
+static SemaphoreHandle_t s_geo_mutex;
+static float      s_lat = FALLBACK_LATITUDE, s_lon = FALLBACK_LONGITUDE;
+static bool       s_geo_ok = false;
+static TickType_t s_geo_last_tick = 0;
+
+static bool location_refresh()
+{
+    xSemaphoreTake(s_geo_mutex, portMAX_DELAY);
+    geo_location_t geo = {};
+    bool ok = geolocation_fetch(&geo) == ESP_OK;
+    if (ok) {
+        s_lat = geo.lat;
+        s_lon = geo.lon;
+        s_geo_ok = true;
+        s_geo_last_tick = xTaskGetTickCount();
+        lvgl_acquire();  // TZ change must not race the clock tick's localtime_r()
+        lv_label_set_text(g_location_label, geo.city);
+        if (geo.has_offset) app_settings_apply_utc_offset(geo.utc_offset_sec);
+        lvgl_release();
+        ESP_LOGI(TAG, "Using IP-geolocated coordinates: %s (%.4f, %.4f)", geo.city, s_lat, s_lon);
+    } else {
+        ESP_LOGW(TAG, "Geolocation failed (coords %.4f, %.4f)", s_lat, s_lon);
+    }
+    xSemaphoreGive(s_geo_mutex);
+    return ok;
+}
+
 // Waits for Wi-Fi, then fetches the weather every 15 minutes. Runs on its own
 // task since the HTTPS request blocks; UI updates go through lvgl_acquire().
 static void weather_task(void *)
@@ -979,24 +1013,15 @@ static void weather_task(void *)
     // behind. Give it a moment before the first request.
     vTaskDelay(pdMS_TO_TICKS(3000));
 
-    // One-time IP geolocation lookup — falls back to config.h's static
-    // coordinates (no city name shown) if it fails.
-    float lat = FALLBACK_LATITUDE, lon = FALLBACK_LONGITUDE;
-    geo_location_t geo;
-    if (geolocation_fetch(&geo) == ESP_OK) {
-        lat = geo.lat;
-        lon = geo.lon;
-        lvgl_acquire();
-        lv_label_set_text(g_location_label, geo.city);
-        lvgl_release();
-        ESP_LOGI(TAG, "Using IP-geolocated coordinates: %s (%.4f, %.4f)", geo.city, lat, lon);
-    } else {
-        ESP_LOGW(TAG, "Geolocation failed, using fallback coordinates (%.4f, %.4f)", lat, lon);
-    }
-
     while (true) {
+        // IP geolocation also drives the time zone (see location_refresh()).
+        // Retry whenever it has never succeeded, and re-check every 6 h so a
+        // DST change or a move to another network is picked up automatically.
+        if (!s_geo_ok || (xTaskGetTickCount() - s_geo_last_tick) > pdMS_TO_TICKS(6UL * 3600UL * 1000UL))
+            location_refresh();
+
         weather_data_t wd;
-        if (weather_fetch(lat, lon, &wd) == ESP_OK) {
+        if (weather_fetch(s_lat, s_lon, &wd) == ESP_OK) {
             // lv_label_set_text_fmt() uses LVGL's own reduced-size snprintf,
             // which doesn't support %f by default (CONFIG_LV_SPRINTF_USE_FLOAT
             // is off) — it printed the literal text "f°" instead of a number.
@@ -1136,6 +1161,7 @@ extern "C" void app_main(void)
     // or wifi_connect_one() (weather_task doesn't, but wifi_reconnect_task
     // does) — creates the mutex those calls serialize on.
     wifi_time_init();
+    s_geo_mutex = xSemaphoreCreateMutex();
 
     dimmer_settings_init();
     dimmer_settings_set_changed_cb(on_dimmer_settings_changed);
@@ -1157,6 +1183,11 @@ extern "C" void app_main(void)
     esp_err_t wifi_ok = wifi_connect_any(g_connect_candidates, g_connect_candidate_count,
                                           wifi_cb, 8000);
     if (wifi_ok == ESP_OK) {
+        // Locate by IP first so the time zone is right before the first sync
+        // (needs a moment for DHCP/DNS after association).
+        set_status("Locating...");
+        vTaskDelay(pdMS_TO_TICKS(1500));
+        location_refresh();
         set_status("Syncing time...");
         if (time_sync(app_settings_get_tz(), NTP_SERVER) == ESP_OK) {
             ESP_LOGI(TAG, "NTP sync OK, clock running");

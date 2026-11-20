@@ -41,7 +41,7 @@ esp_err_t geolocation_fetch(geo_location_t *out)
     // Free tier is plain HTTP only (HTTPS needs a paid plan) — fine here,
     // there's nothing sensitive in an IP-geolocation lookup.
     esp_http_client_config_t cfg = {};
-    cfg.url           = "http://ip-api.com/json/?fields=status,message,city,lat,lon";
+    cfg.url           = "http://ip-api.com/json/?fields=status,message,city,lat,lon,offset";
     cfg.event_handler = http_event_handler;
     cfg.user_data     = &ctx;
     cfg.timeout_ms    = 10000;
@@ -69,14 +69,18 @@ esp_err_t geolocation_fetch(geo_location_t *out)
     cJSON *city = cJSON_GetObjectItem(root, "city");
     cJSON *lat  = cJSON_GetObjectItem(root, "lat");
     cJSON *lon  = cJSON_GetObjectItem(root, "lon");
+    cJSON *off  = cJSON_GetObjectItem(root, "offset");
 
     if (cJSON_IsString(st) && strcmp(st->valuestring, "success") == 0 &&
         cJSON_IsNumber(lat) && cJSON_IsNumber(lon)) {
         strlcpy(out->city, cJSON_IsString(city) ? city->valuestring : "", sizeof(out->city));
         out->lat = (float)lat->valuedouble;
         out->lon = (float)lon->valuedouble;
+        out->has_offset     = cJSON_IsNumber(off);
+        out->utc_offset_sec = out->has_offset ? off->valueint : 0;
         parse_ret = ESP_OK;
-        ESP_LOGI(TAG, "Located: %s (%.4f, %.4f)", out->city, out->lat, out->lon);
+        ESP_LOGI(TAG, "Located: %s (%.4f, %.4f), UTC offset %s%d s", out->city, out->lat, out->lon,
+                 out->has_offset ? "" : "unknown ", out->utc_offset_sec);
     } else {
         ESP_LOGW(TAG, "Geolocation lookup unsuccessful");
     }

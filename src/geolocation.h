@@ -1,10 +1,13 @@
 #pragma once
+#include <stdbool.h>
 #include "esp_err.h"
 
 typedef struct {
     char  city[32];
     float lat;
     float lon;
+    int   utc_offset_sec;  // current UTC offset *including* DST, per ip-api's "offset" field
+    bool  has_offset;
 } geo_location_t;
 
 #ifdef __cplusplus

@@ -3,6 +3,7 @@
 #include "app_settings.h"
 
 static lv_obj_t *s_parent_scr  = nullptr;
+static lv_obj_t *s_auto_btn    = nullptr;
 static lv_obj_t *s_winter_btn  = nullptr;
 static lv_obj_t *s_summer_btn  = nullptr;
 
@@ -12,8 +13,15 @@ static const lv_color_t COLOR_INACTIVE = LV_COLOR_MAKE(60, 60, 60);
 static void refresh_dst_buttons()
 {
     dst_mode_t mode = app_settings_get_dst_mode();
+    lv_obj_set_style_bg_color(s_auto_btn,   mode == DST_AUTO   ? COLOR_ACTIVE : COLOR_INACTIVE, 0);
     lv_obj_set_style_bg_color(s_winter_btn, mode == DST_WINTER ? COLOR_ACTIVE : COLOR_INACTIVE, 0);
     lv_obj_set_style_bg_color(s_summer_btn, mode == DST_SUMMER ? COLOR_ACTIVE : COLOR_INACTIVE, 0);
+}
+
+static void on_auto_click(lv_event_t *)
+{
+    app_settings_set_dst_mode(DST_AUTO);
+    refresh_dst_buttons();
 }
 
 static void on_winter_click(lv_event_t *)
@@ -61,7 +69,7 @@ void season_time_screen_show(lv_obj_t *parent_scr)
     lv_obj_add_event_cb(back, on_back_click, LV_EVENT_CLICKED, nullptr);
 
     lv_obj_t *section = lv_label_create(scr);
-    lv_label_set_text(section, "Daylight Saving Time");
+    lv_label_set_text(section, "Time zone");
     lv_obj_set_style_text_font(section, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(section, lv_color_make(160, 160, 160), 0);
     lv_obj_align(section, LV_ALIGN_CENTER, 0, -70);
@@ -75,6 +83,14 @@ void season_time_screen_show(lv_obj_t *parent_scr)
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(row, 16, 0);
     lv_obj_align(row, LV_ALIGN_CENTER, 0, -20);
+
+    s_auto_btn = lv_btn_create(row);
+    lv_obj_set_size(s_auto_btn, 180, 60);
+    lv_obj_add_event_cb(s_auto_btn, on_auto_click, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *auto_lbl = lv_label_create(s_auto_btn);
+    lv_label_set_text(auto_lbl, "Automatic");
+    lv_obj_set_style_text_font(auto_lbl, &lv_font_montserrat_16, 0);
+    lv_obj_center(auto_lbl);
 
     s_winter_btn = lv_btn_create(row);
     lv_obj_set_size(s_winter_btn, 180, 60);
@@ -95,7 +111,7 @@ void season_time_screen_show(lv_obj_t *parent_scr)
     refresh_dst_buttons();
 
     lv_obj_t *hint = lv_label_create(scr);
-    lv_label_set_text(hint, "Summer time is 1 hour behind winter time");
+    lv_label_set_text(hint, "Automatic follows this network's location (incl. daylight saving).\nWinter / Summer force Chile time (UTC-4 / UTC-3).");
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(hint, lv_color_make(120, 120, 120), 0);
     lv_obj_align(hint, LV_ALIGN_CENTER, 0, 40);
